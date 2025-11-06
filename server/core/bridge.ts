@@ -97,7 +97,7 @@ type ParsedInput<I extends z.ZodTypeAny | undefined> = I extends z.ZodTypeAny
   : never;
 type OutputData<O extends z.ZodTypeAny | undefined> = O extends z.ZodTypeAny
   ? z.output<O>
-  : never;
+  : unknown;
 
 // Legacy route definition (kept for backward compatibility)
 interface LegacyRouteDefinition<
@@ -175,32 +175,18 @@ type RouteMetadata = SharedRouteMetadata;
 
 // ============================================================================
 // COMPOSE ROUTES - Simple merging of route collections
+// Supports any number of collections with accurate intersection typing
 // ============================================================================
 
-export function composeRoutes<A extends LegacyRoutesCollection, B extends LegacyRoutesCollection>(
-  a: A,
-  b: B
-): A & B;
-export function composeRoutes<
-  A extends LegacyRoutesCollection,
-  B extends LegacyRoutesCollection,
-  C extends LegacyRoutesCollection
->(a: A, b: B, c: C): A & B & C;
-export function composeRoutes<
-  A extends LegacyRoutesCollection,
-  B extends LegacyRoutesCollection,
-  C extends LegacyRoutesCollection,
-  D extends LegacyRoutesCollection
->(a: A, b: B, c: C, d: D): A & B & C & D;
-export function composeRoutes<
-  A extends LegacyRoutesCollection,
-  B extends LegacyRoutesCollection,
-  C extends LegacyRoutesCollection,
-  D extends LegacyRoutesCollection,
-  E extends LegacyRoutesCollection
->(a: A, b: B, c: C, d: D, e: E): A & B & C & D & E;
-export function composeRoutes(...collections: LegacyRoutesCollection[]): LegacyRoutesCollection {
-  return Object.assign({}, ...collections);
+type MergeCollections<T extends readonly LegacyRoutesCollection[]> =
+  T extends [infer H extends LegacyRoutesCollection, ...infer R extends LegacyRoutesCollection[]]
+    ? H & MergeCollections<R>
+    : {};
+
+export function composeRoutes<T extends readonly LegacyRoutesCollection[]>(
+  ...collections: T
+): MergeCollections<T> {
+  return Object.assign({}, ...collections) as MergeCollections<T>;
 }
 
 // ============================================================================
@@ -545,7 +531,7 @@ export function setupBridge<T extends LegacyRoutesCollection>(
   };
 
   // Create client API (runtime-agnostic, uses legacy bridge for now)
-  let $api: any;
+  let $api: ExtractRoutes<T>;
   try {
     const bridge = new FullStackBridge(options);
     const defined = bridge.defineRoutes(routes);
@@ -556,7 +542,7 @@ export function setupBridge<T extends LegacyRoutesCollection>(
   } catch (error) {
     // If FullStackBridge fails (missing Express types), create a simple client
     console.warn('Client API creation failed, using fallback');
-    $api = {};
+    $api = {} as ExtractRoutes<T>;
   }
 
   return {

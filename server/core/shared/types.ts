@@ -229,7 +229,7 @@ export type ParsedInput<I extends z.ZodTypeAny | undefined> = I extends z.ZodTyp
  */
 export type OutputData<O extends z.ZodTypeAny | undefined> = O extends z.ZodTypeAny
   ? z.output<O>
-  : never;
+  : unknown;
 
 /**
  * Route definition with hooks support.
