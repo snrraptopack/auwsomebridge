@@ -1,44 +1,93 @@
 import { z } from 'zod';
-import type { Request, Response, NextFunction } from 'express';
+
+// Re-export shared types
+export type {
+  HttpMethod,
+  RouteHook,
+  HookContext,
+  HookResult,
+  HookDefinition,
+  NormalizedRequest,
+  RouteHandler,
+  RouteDefinition,
+  RoutesCollection,
+  RouteMetadata,
+  BridgeConfig,
+  Runtime,
+  SetupBridgeOptions,
+  ApiSuccess,
+  ApiError,
+  ApiResponse,
+} from './shared/types';
+
+// Re-export hook utilities
+export { defineHook, composeHooks } from './shared/hooks';
 
 // ============================================================================
-// SHARED TYPES
+// RUNTIME DETECTION
 // ============================================================================
 
-export interface ApiSuccess<T> {
-  status: 'success';
-  data: T;
-  timestamp: number;
+/**
+ * Detects which runtime is available (Express or Hono).
+ * 
+ * Checks for installed packages in order:
+ * 1. Express
+ * 2. Hono
+ * 
+ * @returns Runtime type or null if neither is installed
+ * 
+ * @example
+ * ```typescript
+ * const runtime = detectRuntime();
+ * if (runtime === 'express') {
+ *   console.log('Using Express');
+ * } else if (runtime === 'hono') {
+ *   console.log('Using Hono');
+ * }
+ * ```
+ */
+export function detectRuntime(): 'express' | 'hono' | null {
+  try {
+    require.resolve('express');
+    return 'express';
+  } catch {}
+
+  try {
+    require.resolve('hono');
+    return 'hono';
+  } catch {}
+
+  return null;
 }
 
-export interface ApiError {
-  status: 'error';
-  error: string;
-  code: string;
-  details?: Record<string, unknown>;
-  timestamp: number;
-}
+// ============================================================================
+// LEGACY TYPES (for backward compatibility)
+// ============================================================================
 
-export type ApiResponse<T> = ApiSuccess<T> | ApiError;
+import type { ApiSuccess, ApiError, ApiResponse, HttpMethod, RouteHandler as SharedRouteHandler, RouteMetadata as SharedRouteMetadata } from './shared/types';
 
-export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+// Conditional Express types - only used by legacy FullStackBridge
+type ExpressRequest = any;
+type ExpressResponse = any;
+type ExpressNextFunction = any;
 
+// Legacy middleware types (only used by old FullStackBridge class)
 export type Middleware = (
-  req: Request,
-  res: Response,
-  next: NextFunction
+  req: ExpressRequest,
+  res: ExpressResponse,
+  next: ExpressNextFunction
 ) => Promise<void> | void;
 
 export type RouteMiddleware = (
-  req: Request,
+  req: ExpressRequest,
   input: unknown
 ) => Promise<{ authorized: boolean; context?: Record<string, unknown> }>;
 
-export type RouteHandler<
+type RouteHandler<
   Input = unknown,
   Output = unknown,
   Context = unknown
-> = (input: Input, context?: Context) => Promise<Output> | Output;
+> = SharedRouteHandler<Input, Output, Context>;
 
 type InputParams<I extends z.ZodTypeAny | undefined> = I extends z.ZodTypeAny
   ? z.input<I>
@@ -50,7 +99,8 @@ type OutputData<O extends z.ZodTypeAny | undefined> = O extends z.ZodTypeAny
   ? z.output<O>
   : never;
 
-export interface RouteDefinition<
+// Legacy route definition (kept for backward compatibility)
+interface LegacyRouteDefinition<
   I extends z.ZodTypeAny | undefined = undefined,
   O extends z.ZodTypeAny | undefined = undefined,
   C = unknown
@@ -63,8 +113,33 @@ export interface RouteDefinition<
   middleware?: RouteMiddleware[];
   description?: string;
   tags?: string[];
+  hooks?: any[]; // Added for new hook system
 }
 
+/**
+ * Defines a route with type-safe input/output validation and hooks support.
+ * 
+ * @template I - Input Zod schema type
+ * @template O - Output Zod schema type
+ * @template C - Context type
+ * @param def - Route definition
+ * @returns Typed route definition
+ * 
+ * @example
+ * ```typescript
+ * export const userRoutes = {
+ *   getUser: defineRoute({
+ *     method: 'GET',
+ *     input: z.object({ id: z.string() }),
+ *     output: z.object({ id: z.string(), name: z.string() }),
+ *     hooks: [authHook, loggerHook],
+ *     handler: async ({ id }, context) => {
+ *       return { id, name: 'John Doe' };
+ *     }
+ *   })
+ * };
+ * ```
+ */
 export function defineRoute<
   I extends z.ZodTypeAny | undefined = undefined,
   O extends z.ZodTypeAny | undefined = undefined,
@@ -76,16 +151,17 @@ export function defineRoute<
   handler: RouteHandler<ParsedInput<I>, OutputData<O>, C>;
   auth?: boolean;
   middleware?: RouteMiddleware[];
+  hooks?: any[];
   description?: string;
   tags?: string[];
-}): RouteDefinition<I, O, C> {
-  return def as RouteDefinition<I, O, C>;
+}): LegacyRouteDefinition<I, O, C> {
+  return def as LegacyRouteDefinition<I, O, C>;
 }
 
-export type RoutesCollection = Record<string, RouteDefinition<any, any, any>>;
+type LegacyRoutesCollection = Record<string, LegacyRouteDefinition<any, any, any>>;
 
-export type ExtractRoutes<T extends RoutesCollection> = {
-  [K in keyof T]: T[K] extends RouteDefinition<
+export type ExtractRoutes<T extends LegacyRoutesCollection> = {
+  [K in keyof T]: T[K] extends LegacyRouteDefinition<
     infer I extends z.ZodTypeAny | undefined,
     infer O extends z.ZodTypeAny | undefined
   >
@@ -95,43 +171,35 @@ export type ExtractRoutes<T extends RoutesCollection> = {
     : never;
 };
 
-export interface RouteMetadata {
-  path: string;
-  method: HttpMethod;
-  description?: string;
-  tags?: string[];
-  requires_auth: boolean;
-  input_schema?: z.ZodTypeAny;
-  output_schema?: z.ZodTypeAny;
-}
+type RouteMetadata = SharedRouteMetadata;
 
 // ============================================================================
 // COMPOSE ROUTES - Simple merging of route collections
 // ============================================================================
 
-export function composeRoutes<A extends RoutesCollection, B extends RoutesCollection>(
+export function composeRoutes<A extends LegacyRoutesCollection, B extends LegacyRoutesCollection>(
   a: A,
   b: B
 ): A & B;
 export function composeRoutes<
-  A extends RoutesCollection,
-  B extends RoutesCollection,
-  C extends RoutesCollection
+  A extends LegacyRoutesCollection,
+  B extends LegacyRoutesCollection,
+  C extends LegacyRoutesCollection
 >(a: A, b: B, c: C): A & B & C;
 export function composeRoutes<
-  A extends RoutesCollection,
-  B extends RoutesCollection,
-  C extends RoutesCollection,
-  D extends RoutesCollection
+  A extends LegacyRoutesCollection,
+  B extends LegacyRoutesCollection,
+  C extends LegacyRoutesCollection,
+  D extends LegacyRoutesCollection
 >(a: A, b: B, c: C, d: D): A & B & C & D;
 export function composeRoutes<
-  A extends RoutesCollection,
-  B extends RoutesCollection,
-  C extends RoutesCollection,
-  D extends RoutesCollection,
-  E extends RoutesCollection
+  A extends LegacyRoutesCollection,
+  B extends LegacyRoutesCollection,
+  C extends LegacyRoutesCollection,
+  D extends LegacyRoutesCollection,
+  E extends LegacyRoutesCollection
 >(a: A, b: B, c: C, d: D, e: E): A & B & C & D & E;
-export function composeRoutes(...collections: RoutesCollection[]): RoutesCollection {
+export function composeRoutes(...collections: LegacyRoutesCollection[]): LegacyRoutesCollection {
   return Object.assign({}, ...collections);
 }
 
@@ -139,7 +207,8 @@ export function composeRoutes(...collections: RoutesCollection[]): RoutesCollect
 // INTERNAL BRIDGE (hidden from developers)
 // ============================================================================
 
-export interface BridgeConfig {
+// Legacy BridgeConfig (kept for backward compatibility)
+interface LegacyBridgeConfig {
   prefix?: string;
   validateResponses?: boolean;
   logRequests?: boolean;
@@ -148,7 +217,7 @@ export interface BridgeConfig {
 }
 
 export class FullStackBridge {
-  private routes: Map<string, RouteDefinition<any, any, any>> = new Map();
+  private routes: Map<string, LegacyRouteDefinition<any, any, any>> = new Map();
   private routeMetadata: Map<string, RouteMetadata> = new Map();
   private prefix: string;
   private validateResponses: boolean;
@@ -156,7 +225,7 @@ export class FullStackBridge {
   private globalMiddleware: Middleware[];
   private defaultAuthMiddleware?: RouteMiddleware;
 
-  constructor(config: BridgeConfig = {}) {
+  constructor(config: LegacyBridgeConfig = {}) {
     this.prefix = config.prefix ?? '/api';
     this.validateResponses = config.validateResponses ?? true;
     this.logRequests = config.logRequests ?? false;
@@ -164,7 +233,7 @@ export class FullStackBridge {
     this.defaultAuthMiddleware = config.defaultAuthMiddleware;
   }
 
-  defineRoutes<T extends RoutesCollection>(routeDefs: T): T & { __routes: T } {
+  defineRoutes<T extends LegacyRoutesCollection>(routeDefs: T): T & { __routes: T } {
     for (const [name, def] of Object.entries(routeDefs)) {
       this.routes.set(name, {
         method: def.method ?? 'POST',
@@ -195,7 +264,7 @@ export class FullStackBridge {
   }
 
   createMiddleware() {
-    return async (req: Request, res: Response, next: NextFunction) => {
+    return async (req: ExpressRequest, res: ExpressResponse, next: ExpressNextFunction) => {
       for (const mw of this.globalMiddleware) {
         await new Promise<void>((resolve, reject) => {
           mw(req, res, (err?: any) => {
@@ -298,7 +367,7 @@ export class FullStackBridge {
     };
   }
 
-  createClient<T extends RoutesCollection>(
+  createClient<T extends LegacyRoutesCollection>(
     routeDefs: T,
     options?: { baseUrl?: string; onError?: (error: ApiError) => void }
   ): ExtractRoutes<T> {
@@ -346,7 +415,7 @@ export class FullStackBridge {
     return client;
   }
 
-  private sendSuccess(res: Response, statusCode: number, data: unknown) {
+  private sendSuccess(res: ExpressResponse, statusCode: number, data: unknown) {
     const response: ApiSuccess<unknown> = {
       status: 'success',
       data,
@@ -356,7 +425,7 @@ export class FullStackBridge {
   }
 
   private sendError(
-    res: Response,
+    res: ExpressResponse,
     statusCode: number,
     code: string,
     message: string,
@@ -377,27 +446,122 @@ export class FullStackBridge {
 // PUBLIC SETUP API - setupBridge for server initialization
 // ============================================================================
 
-export interface SetupBridgeOptions extends BridgeConfig {
-  baseUrl?: string;
-  clientOptions?: { onError?: (error: ApiError) => void };
-}
+import type { BridgeConfig as NewBridgeConfig, SetupBridgeOptions as NewSetupBridgeOptions, RoutesCollection as NewRoutesCollection } from './shared/types';
 
-export function setupBridge<T extends RoutesCollection>(
+/**
+ * Sets up the bridge with automatic runtime detection and hooks support.
+ * 
+ * This function:
+ * - Detects available runtime (Express or Hono)
+ * - Creates appropriate middleware adapter
+ * - Supports global and route-specific hooks
+ * - Generates type-safe client API
+ * 
+ * @template T - Routes collection type
+ * @param routes - Route definitions
+ * @param options - Bridge configuration options
+ * @returns Object with middleware, metadata, and client API
+ * 
+ * @example
+ * ```typescript
+ * // With Express (auto-detected)
+ * const { middleware, $api } = setupBridge(routes, {
+ *   prefix: '/api',
+ *   hooks: [rateLimitHook, loggerHook]
+ * });
+ * 
+ * app.use('/api/:route', middleware);
+ * ```
+ * 
+ * @example
+ * ```typescript
+ * // With Hono (auto-detected)
+ * const { middleware, $api } = setupBridge(routes, {
+ *   prefix: '/api',
+ *   hooks: [rateLimitHook, loggerHook]
+ * });
+ * 
+ * app.use('/api/:route', middleware);
+ * ```
+ * 
+ * @example
+ * ```typescript
+ * // Explicitly specify runtime
+ * const { middleware, $api } = setupBridge(routes, {
+ *   runtime: 'hono',
+ *   hooks: [rateLimitHook]
+ * });
+ * ```
+ */
+export function setupBridge<T extends LegacyRoutesCollection>(
   routes: T,
-  options?: SetupBridgeOptions
+  options?: NewSetupBridgeOptions
 ) {
-  const bridge = new FullStackBridge(options);
-  const defined = bridge.defineRoutes(routes);
+  // Detect runtime
+  const runtime = options?.runtime ?? detectRuntime();
 
-  return {
-    // For backend Express setup
-    middleware: bridge.createMiddleware(),
-    metadata: () => bridge.getMetadata(),
+  if (!runtime) {
+    throw new Error(
+      'No runtime detected. Please install either express or hono:\n' +
+      '  npm install express\n' +
+      '  or\n' +
+      '  npm install hono'
+    );
+  }
 
-    // For frontend
-    $api: bridge.createClient(defined.__routes, {
+  // Convert routes to Map
+  const routesMap = new Map(Object.entries(routes));
+
+  // Create bridge config
+  const config: NewBridgeConfig = {
+    prefix: options?.prefix,
+    validateResponses: options?.validateResponses,
+    logRequests: options?.logRequests,
+    hooks: options?.hooks,
+  };
+
+  // Load appropriate adapter
+  let middleware: any;
+  if (runtime === 'express') {
+    const { createExpressMiddleware } = require('./express');
+    middleware = createExpressMiddleware(routesMap, config);
+  } else {
+    const { createHonoMiddleware } = require('./hono');
+    middleware = createHonoMiddleware(routesMap, config);
+  }
+
+  // Create metadata function
+  const metadata = () => {
+    const prefix = config.prefix ?? '/api';
+    return Array.from(routesMap.entries()).map(([name, def]) => ({
+      path: `${prefix}/${name}`,
+      method: def.method ?? 'POST',
+      description: def.description,
+      tags: def.tags,
+      requires_auth: false, // Deprecated, use hooks instead
+      input_schema: def.input,
+      output_schema: def.output,
+    }));
+  };
+
+  // Create client API (runtime-agnostic, uses legacy bridge for now)
+  let $api: any;
+  try {
+    const bridge = new FullStackBridge(options);
+    const defined = bridge.defineRoutes(routes);
+    $api = bridge.createClient(defined.__routes, {
       baseUrl: options?.baseUrl ?? options?.prefix ?? '/api',
       onError: options?.clientOptions?.onError,
-    }),
+    });
+  } catch (error) {
+    // If FullStackBridge fails (missing Express types), create a simple client
+    console.warn('Client API creation failed, using fallback');
+    $api = {};
+  }
+
+  return {
+    middleware,
+    metadata,
+    $api,
   };
 }

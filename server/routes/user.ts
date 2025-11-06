@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defineRoute } from '../core/bridge';
+import { authHook } from '../hooks';
 
 export const userRoutes = {
   getUserById: defineRoute({
@@ -10,10 +11,11 @@ export const userRoutes = {
       name: z.string(),
       email: z.string().email(),
     }),
-    auth: true,
+    // Use new hooks system instead of auth flag
+    hooks: [authHook],
     description: 'Fetch a user by ID',
     tags: ['users'],
-    handler: async ({ id }, context) => ({
+    handler: async ({ id }, context?:{userId:string}) => ({
       id,
       name: 'John Doe',
       email: 'john@example.com',

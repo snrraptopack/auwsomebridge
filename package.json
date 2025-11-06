@@ -1,24 +1,59 @@
 {
-  "name": "testing",
-  "version": "0.0.0",
-  "private": true,
+  "name": "auwsomebridge",
+  "version": "0.0.1",
+  "private": false,
   "type": "module",
+  "description": "Unified, runtime-agnostic API bridge for Express and Hono with validation and hooks",
+  "keywords": [
+    "api",
+    "bridge",
+    "express",
+    "hono",
+    "hooks",
+    "zod",
+    "runtime-agnostic"
+  ],
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snrraptopack/auwsomebridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/snrraptopack/auwsomebridge/issues"
+  },
+  "homepage": "https://github.com/snrraptopack/auwsomebridge#readme",
+  "author": "auwsomebridge team",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "server": "bun run server/app.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "server": "bun run server/app-hono.ts",
+    "server:express": "bun run server/app.ts",
+    "server:hono": "bun run server/app-hono.ts",
     "api:gen": "bun run scripts/generate-api.ts"
   },
+  "main": "./dist/bridge.js",
+  "types": "./dist/bridge.d.ts",
   "dependencies": {
-    "@types/express": "^5.0.5",
-    "auwla": "latest",
-    "express": "^5.1.0",
     "zod": "^4.1.12"
   },
   "devDependencies": {
     "typescript": "latest",
-    "vite": "latest",
     "@types/bun": "latest"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/bridge.d.ts",
+      "import": "./dist/bridge.js"
+    }
   }
 }

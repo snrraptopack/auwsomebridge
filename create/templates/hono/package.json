@@ -1,0 +1,17 @@
+{
+  "name": "hono-bridge-template",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server:hono": "bun run server/app-hono.ts"
+  },
+  "dependencies": {
+    "hono": "^4",
+    "zod": "^4",
+    "auwsomebridge": "latest"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "@types/bun": "latest"
+  }
+}
