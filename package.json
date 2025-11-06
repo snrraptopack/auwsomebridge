@@ -1,0 +1,24 @@
+{
+  "name": "testing",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "bun run server/app.ts",
+    "api:gen": "bun run scripts/generate-api.ts"
+  },
+  "dependencies": {
+    "@types/express": "^5.0.5",
+    "auwla": "latest",
+    "express": "^5.1.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "vite": "latest",
+    "@types/bun": "latest"
+  }
+}
