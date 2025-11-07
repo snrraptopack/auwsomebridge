@@ -47,17 +47,19 @@ export { defineHook, composeHooks } from './shared/hooks';
  * ```
  */
 export function detectRuntime(): 'express' | 'hono' | null {
-  try {
-    require.resolve('express');
-    return 'express';
-  } catch {}
+  // ESM-safe runtime detection
+  // Prefer explicit configuration via env or options; avoid CommonJS require.
+  const envRuntime = (typeof process !== 'undefined'
+    ? (process.env?.BRIDGE_RUNTIME as 'express' | 'hono' | undefined)
+    : undefined);
 
-  try {
-    require.resolve('hono');
-    return 'hono';
-  } catch {}
+  if (envRuntime === 'express' || envRuntime === 'hono') {
+    return envRuntime;
+  }
 
-  return null;
+  // Heuristic fallback: default to 'hono' to support ESM/SSR and Workers environments.
+  // For Express/Node usage, pass options.runtime: 'express' or set BRIDGE_RUNTIME=express.
+  return 'hono';
 }
 
 // ============================================================================
@@ -433,6 +435,8 @@ export class FullStackBridge {
 // ============================================================================
 
 import type { BridgeConfig as NewBridgeConfig, SetupBridgeOptions as NewSetupBridgeOptions, RoutesCollection as NewRoutesCollection } from './shared/types';
+import { createExpressMiddleware } from './express';
+import { createHonoMiddleware } from './hono';
 
 /**
  * Sets up the bridge with automatic runtime detection and hooks support.
@@ -509,10 +513,8 @@ export function setupBridge<T extends LegacyRoutesCollection>(
   // Load appropriate adapter
   let middleware: any;
   if (runtime === 'express') {
-    const { createExpressMiddleware } = require('./express');
     middleware = createExpressMiddleware(routesMap, config);
   } else {
-    const { createHonoMiddleware } = require('./hono');
     middleware = createHonoMiddleware(routesMap, config);
   }
 
