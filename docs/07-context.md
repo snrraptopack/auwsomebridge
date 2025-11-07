@@ -8,6 +8,13 @@ The `context` object is a mutable bag populated by hooks and passed to your rout
 - Each hook may add or update fields on `context`.
 - The final handler receives `context` as its optional second parameter.
 
+## Platform Context
+
+- Native runtime objects are exposed on `context.platform` for handlers and on `ctx.platform` for hooks.
+- Hono: `context.platform.c` is the Hono `Context` and includes `c.env`, `c.req`, `c.req.raw`, `c.executionCtx`.
+- Express: `context.platform.req`/`context.platform.res` are the native Express `Request`/`Response`.
+- This mirrors the runtime without modification — use it to interoperate with native middleware or libraries (e.g., better-auth).
+
 ```
 handler: async (input, context?: { userId: string; role?: 'admin' | 'moderator' | 'user' }) => {
   // Narrowing example
@@ -45,6 +52,7 @@ return { next: true };
 ## Cloudflare Bindings (`context.env`)
 
 - When running under Hono on Cloudflare Workers, the adapter injects `c.env` into `context.env`.
+- You can also read bindings directly from `context.platform.c.env`.
 - On non-Workers runtimes (local Node/Express), `context.env` is `undefined`; guard accordingly.
 - Recommended usage:
   - Access bindings from hooks or handlers: `context.env.MY_KV`, `context.env.MY_QUEUE`, `context.env.MY_R2`.

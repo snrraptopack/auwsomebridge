@@ -127,15 +127,16 @@ export function createHonoMiddleware(
       // Update body with parsed input
       normalizedReq.body = input;
 
-      // Create hook context
+      // Create platform context (native Hono Context) and hook context
+      const platform = { type: 'hono' as const, c };
       const hookContext: HookContext = {
         req: normalizedReq,
+        platform,
         method: expectedMethod,
         route: routeName,
         input,
-        // Inject Cloudflare Workers bindings (if present) into context
-        // Hono exposes bindings on c.env in Workers runtime
-        context: { env: (c as any)?.env },
+        // Inject env via context and expose platform to handlers
+        context: { env: (c as any)?.env, platform },
       };
 
       // Combine global and route hooks

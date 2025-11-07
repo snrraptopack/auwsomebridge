@@ -105,13 +105,16 @@ export function createExpressMiddleware(
       // Normalize request
       const normalizedReq = normalizeExpressRequest(req);
 
-      // Create hook context
+      // Create platform context (native Express objects) and hook context
+      const platform = { type: 'express' as const, req, res };
       const hookContext: HookContext = {
         req: normalizedReq,
+        platform,
         method: expectedMethod,
         route: routeName,
         input,
-        context: {},
+        // Expose platform to handlers via context.platform
+        context: { platform },
       };
 
       // Combine global and route hooks

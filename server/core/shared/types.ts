@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import type { Context as HonoContext } from 'hono';
+import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 
 // ============================================================================
 // HTTP TYPES
@@ -33,6 +35,33 @@ export interface NormalizedRequest {
   /** Full request URL */
   url: string;
 }
+
+// ============================================================================
+// PLATFORM CONTEXT
+// ============================================================================
+
+/**
+ * Native platform context exposed to hooks and handlers.
+ * 
+ * This union provides direct access to the underlying server runtime
+ * without modifying its native objects. Use this for integrations that
+ * require Hono `Context` or Express `req`/`res`.
+ */
+export type PlatformContext =
+  | {
+      /** Discriminator indicating Hono runtime */
+      type: 'hono';
+      /** Native Hono Context (includes env, req, executionCtx, etc.) */
+      c: HonoContext;
+    }
+  | {
+      /** Discriminator indicating Express runtime */
+      type: 'express';
+      /** Native Express Request */
+      req: ExpressRequest;
+      /** Native Express Response */
+      res: ExpressResponse;
+    };
 
 /**
  * Successful API response structure
@@ -110,6 +139,8 @@ export type HookResult =
 export interface HookContext<TContext = Record<string, any>> {
   /** Normalized request object */
   req: NormalizedRequest;
+  /** Native platform context (Hono or Express) */
+  platform: PlatformContext;
   /** HTTP method */
   method: HttpMethod;
   /** Route name (e.g., 'getUserById') */

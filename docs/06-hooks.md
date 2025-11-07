@@ -7,7 +7,10 @@ Hooks provide composable, cross-cutting behavior across all routes, identical in
 - A hook is a function that receives a `HookContext` and returns a `HookResult` to control execution.
 - It can:
   - Read normalized request data via `ctx.req` (method, headers, body, query, params, ip, url).
-  - Read/modify `ctx.context` (shared, mutable object passed to the final handler).
+  - Access native runtime via `ctx.platform`:
+    - Hono: `ctx.platform.c` is the Hono `Context` (`c.env`, `c.req`, `c.req.raw`, `c.executionCtx`).
+    - Express: `ctx.platform.req`/`ctx.platform.res` are the native Express objects.
+  - Read/modify `ctx.context` (shared, mutable object passed to the final handler). `context.platform` mirrors `ctx.platform` for handlers.
   - Short-circuit the chain with an error or an early success response.
   - Continue to the next hook/handler.
 
@@ -120,7 +123,34 @@ export const createSimpleCache = defineHook({
 Notes:
 - Prefer small, focused hooks.
 - Only place data in `ctx.context` that handlers actually use.
-- Use `ctx.req` for raw request details inside hooks; copy selected fields into `context` if handlers need them.
+- Use `ctx.req` for normalized request details inside hooks; use `ctx.platform` for native features (Hono `Context`, Express `req/res`). Copy selected fields into `context` only when handlers need them.
+
+## Platform Access Examples
+
+Example: use native platform for authentication
+
+```
+import { defineHook } from '../core/shared/hooks';
+
+export const authGuard = defineHook({
+  name: 'auth-guard',
+  handler: async (ctx) => {
+    if (ctx.platform.type === 'hono') {
+      // Access native Hono Context
+      const headers = ctx.platform.c.req.raw.headers;
+      // e.g., better-auth: await auth.api.getSession({ headers })
+    } else {
+      // Express native req/res
+      const { req } = ctx.platform;
+      const authHeader = Array.isArray(req.headers.authorization)
+        ? req.headers.authorization[0]
+        : req.headers.authorization;
+      // e.g., verify token via req headers
+    }
+    return { next: true };
+  },
+});
+```
 
 ## Early Returns and Errors
 
