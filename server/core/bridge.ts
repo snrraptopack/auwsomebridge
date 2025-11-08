@@ -20,6 +20,8 @@ export type {
   ApiResponse,
 } from './shared/types';
 
+
+
 // Re-export hook utilities
 export { defineHook, composeHooks } from './shared/hooks';
 
@@ -102,7 +104,7 @@ type OutputData<O extends z.ZodTypeAny | undefined> = O extends z.ZodTypeAny
   : unknown;
 
 // Legacy route definition (kept for backward compatibility)
-interface LegacyRouteDefinition<
+export interface LegacyRouteDefinition<
   I extends z.ZodTypeAny | undefined = undefined,
   O extends z.ZodTypeAny | undefined = undefined,
   C = unknown
@@ -160,7 +162,7 @@ export function defineRoute<
   return def as LegacyRouteDefinition<I, O, C>;
 }
 
-type LegacyRoutesCollection = Record<string, LegacyRouteDefinition<any, any, any>>;
+export type LegacyRoutesCollection = Record<string, LegacyRouteDefinition<any, any, any>>;
 
 export type ExtractRoutes<T extends LegacyRoutesCollection> = {
   [K in keyof T]: T[K] extends LegacyRouteDefinition<
