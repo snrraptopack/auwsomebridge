@@ -1,0 +1,17 @@
+{
+  "name": "bun-bridge-template",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "bun run server/app-bun.ts",
+    "dev": "bun --watch server/app-bun.ts"
+  },
+  "dependencies": {
+    "zod": "^4",
+    "auwsomebridge": "latest"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "@types/bun": "latest"
+  }
+}

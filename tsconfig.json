@@ -6,7 +6,8 @@
     "lib": ["ESNext"],
     "strict": true,
     "skipLibCheck": true,
-    "baseUrl": "."
+    "baseUrl": ".",
+    "allowSyntheticDefaultImports":true,
   },
   "include": ["server/**/*", "docs/**/*"]
 }

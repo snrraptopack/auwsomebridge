@@ -65,7 +65,7 @@ export {
 } from './rate-limit';
 
 // Logging
-export { loggerHook, detailedLoggerHook, errorLoggerHook } from './logger';
+export { loggerHook, detailedLoggerHook, errorLoggerHook, metricsHook } from './logger';
 
 // Caching
 export {
@@ -75,6 +75,10 @@ export {
   longCache,
   createUserCacheHook,
   userCache,
+  createFullCacheHook,
+  shortFullCache,
+  mediumFullCache,
+  longFullCache,
 } from './cache';
 
 // Permissions
@@ -90,3 +94,6 @@ export {
 
 // Environment bindings guard
 export { envGuardHook, createEnvGuardHook } from './env';
+
+// Audit logging
+export { auditHook, detailedAuditHook, sensitiveAuditHook } from './audit';

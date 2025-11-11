@@ -1,4 +1,11 @@
-import type { HookDefinition, RouteHook, HookContext, HookResult } from './types';
+import type {
+  HookDefinition,
+  RouteHook,
+  HookContext,
+  HookResult,
+  LifecycleHook,
+  BeforeHook,
+} from './types';
 
 // ============================================================================
 // HOOK DEFINITION
@@ -7,18 +14,20 @@ import type { HookDefinition, RouteHook, HookContext, HookResult } from './types
 /**
  * Defines a hook that can be used in routes or globally.
  * 
- * This function creates hooks with optional configuration and state management.
+ * This function creates hooks with optional configuration, state management, and lifecycle support.
+ * - Supports legacy `handler` (treated as before hook) for backward compatibility
+ * - Supports lifecycle methods: `before`, `after`, `cleanup`
  * - If no `setup` function is provided, returns a RouteHook directly
  * - If `setup` is provided, returns a factory function that creates RouteHook instances
  * 
  * @template TConfig - Configuration type for the hook (void if no config needed)
  * @template TState - State type returned by setup function
  * 
- * @param definition - Hook definition with name, optional setup, and handler
+ * @param definition - Hook definition with name, optional setup, and lifecycle methods
  * @returns If setup is provided, returns a factory function; otherwise returns a RouteHook directly
  * 
  * @example
- * // Simple hook without configuration
+ * // Legacy hook (backward compatible)
  * const loggerHook = defineHook({
  *   name: 'logger',
  *   handler: (ctx) => {
@@ -27,104 +36,109 @@ import type { HookDefinition, RouteHook, HookContext, HookResult } from './types
  *   }
  * });
  * 
- * // Use directly in routes
- * hooks: [loggerHook]
- * 
  * @example
- * // Configurable hook with state management
- * const createRateLimitHook = defineHook({
- *   name: 'rateLimit',
- *   setup: (config: { max: number; window: number }) => {
- *     // State is captured in closure
- *     let counter = 0;
- *     let timestamp = Date.now();
- *     return { counter, timestamp, ...config };
+ * // Lifecycle hook with all phases
+ * const metricsHook = defineHook({
+ *   name: 'metrics',
+ *   before: (ctx) => {
+ *     ctx.context.__startTime = Date.now();
+ *     return { next: true };
  *   },
- *   handler: (ctx, state) => {
- *     const now = Date.now();
- *     
- *     // Reset counter if window expired
- *     if (now - state.timestamp > state.window) {
- *       state.timestamp = now;
- *       state.counter = 0;
- *     }
- *     
- *     state.counter++;
- *     
- *     if (state.counter > state.max) {
- *       return { next: false, status: 429, error: 'Too many requests' };
- *     }
- *     
+ *   after: (ctx) => {
+ *     console.log('Handler completed');
  *     return { next: true };
- *   }
- * });
- * 
- * // Create instances with different configs
- * const strictLimit = createRateLimitHook({ max: 10, window: 1000 });
- * const relaxedLimit = createRateLimitHook({ max: 100, window: 60000 });
- * 
- * // Each instance has isolated state
- * hooks: [strictLimit]
- * 
- * @example
- * // Hook that modifies context for subsequent hooks
- * const authHook = defineHook({
- *   name: 'auth',
- *   handler: async (ctx) => {
- *     const token = ctx.req.headers.authorization?.split(' ')[1];
- *     
- *     if (!token) {
- *       return { next: false, status: 401, error: 'Unauthorized' };
- *     }
- *     
- *     // Validate token and add to context
- *     const user = await validateToken(token);
- *     ctx.context.userId = user.id;
- *     ctx.context.role = user.role;
- *     
+ *   },
+ *   cleanup: (ctx) => {
+ *     const duration = Date.now() - ctx.context.__startTime;
+ *     console.log(`Duration: ${duration}ms, Success: ${ctx.success}`);
  *     return { next: true };
  *   }
  * });
  * 
  * @example
- * // Hook that returns early response (skips handler)
- * const cacheHook = defineHook({
+ * // Lifecycle hook with state management
+ * const createCacheHook = defineHook({
  *   name: 'cache',
  *   setup: (config: { ttl: number }) => {
  *     const cache = new Map<string, { data: any; expires: number }>();
  *     return { cache, ttl: config.ttl };
  *   },
- *   handler: async (ctx, state) => {
+ *   before: (ctx, state) => {
  *     const key = `${ctx.route}:${JSON.stringify(ctx.input)}`;
  *     const cached = state.cache.get(key);
  *     
  *     if (cached && cached.expires > Date.now()) {
- *       // Return cached response, skip handler
  *       return { next: true, response: cached.data };
  *     }
  *     
- *     // Continue to handler
+ *     ctx.context.__cacheKey = key;
+ *     return { next: true };
+ *   },
+ *   after: (ctx, state) => {
+ *     const key = ctx.context.__cacheKey;
+ *     if (key) {
+ *       state.cache.set(key, {
+ *         data: ctx.response,
+ *         expires: Date.now() + state.ttl * 1000,
+ *       });
+ *     }
  *     return { next: true };
  *   }
  * });
+ * 
+ * const shortCache = createCacheHook({ ttl: 60 });
  */
 export function defineHook<TConfig = void, TState = any>(
   definition: HookDefinition<TConfig, TState>
 ): TConfig extends void ? RouteHook : (config: TConfig) => RouteHook {
-  // If no setup function, return RouteHook directly
+  // Detect if this is a lifecycle hook or legacy hook
+  const isLifecycleHook = !!(definition.before || definition.after || definition.cleanup);
+  const isLegacyHook = !!definition.handler;
+
+  // If no setup function
   if (!definition.setup) {
-    const hook: RouteHook = (ctx: HookContext) => definition.handler(ctx);
-    return hook as any;
+    if (isLifecycleHook) {
+      // Return lifecycle hook object
+      const lifecycleHook: LifecycleHook = {
+        __hookName: definition.name,
+        __isLifecycleHook: true,
+        before: definition.before,
+        after: definition.after,
+        cleanup: definition.cleanup,
+      };
+      return lifecycleHook as any;
+    } else if (isLegacyHook) {
+      // Legacy hook - single handler treated as before hook
+      const hook: BeforeHook = (ctx: HookContext) => definition.handler!(ctx);
+      return hook as any;
+    } else {
+      // No handler or lifecycle methods - invalid
+      throw new Error(`Hook "${definition.name}" must have either handler or lifecycle methods (before/after/cleanup)`);
+    }
   }
 
-  // If setup function exists, return factory function
+  // Has setup function - return factory
   const factory = (config: TConfig): RouteHook => {
-    // Call setup once to initialize state
     const state = definition.setup!(config);
 
-    // Return hook with closure over state
-    const hook: RouteHook = (ctx: HookContext) => definition.handler(ctx, state);
-    return hook;
+    if (isLifecycleHook) {
+      // Create lifecycle hook with state closure
+      const lifecycleHook: LifecycleHook = {
+        __hookName: definition.name,
+        __isLifecycleHook: true,
+        before: definition.before ? (ctx) => definition.before!(ctx, state) : undefined,
+        after: definition.after ? (ctx) => definition.after!(ctx, state) : undefined,
+        cleanup: definition.cleanup ? (ctx) => definition.cleanup!(ctx, state) : undefined,
+      };
+      return lifecycleHook;
+    } else if (isLegacyHook) {
+      // Legacy hook with state
+      const hook: BeforeHook = (ctx: HookContext) => definition.handler!(ctx, state);
+      return hook;
+    } else {
+      // No handler or lifecycle methods - invalid
+      throw new Error(`Hook "${definition.name}" must have either handler or lifecycle methods (before/after/cleanup)`);
+    }
   };
 
   return factory as any;
@@ -135,6 +149,16 @@ export function defineHook<TConfig = void, TState = any>(
 // ============================================================================
 
 /**
+ * Checks if a hook is a lifecycle hook.
+ * 
+ * @param hook - Hook to check
+ * @returns True if the hook is a lifecycle hook
+ */
+function isLifecycleHook(hook: RouteHook): hook is LifecycleHook {
+  return typeof hook === 'object' && '__isLifecycleHook' in hook && hook.__isLifecycleHook === true;
+}
+
+/**
  * Composes multiple hooks into a single hook that executes them sequentially.
  * 
  * The composed hook will:
@@ -143,8 +167,11 @@ export function defineHook<TConfig = void, TState = any>(
  * - Return early if any hook returns `{ next: true, response }`
  * - Continue to next hook if hook returns `{ next: true }`
  * 
+ * Note: This function only composes before hooks. Lifecycle hooks are flattened
+ * to their before methods. For full lifecycle support, use hooks directly in routes.
+ * 
  * @param hooks - Hooks to compose (executed in order)
- * @returns A single RouteHook that executes all provided hooks sequentially
+ * @returns A single BeforeHook that executes all provided hooks sequentially
  * 
  * @example
  * // Create reusable hook compositions
@@ -183,12 +210,25 @@ export function defineHook<TConfig = void, TState = any>(
  * const baseProtection = composeHooks(rateLimitHook, authHook);
  * const adminProtection = composeHooks(baseProtection, adminOnlyHook);
  */
-export function composeHooks(...hooks: RouteHook[]): RouteHook {
+export function composeHooks(...hooks: RouteHook[]): BeforeHook {
   return async (ctx: HookContext): Promise<HookResult> => {
     // Execute hooks sequentially
     for (const hook of hooks) {
       try {
-        const result = await hook(ctx);
+        let result: HookResult;
+
+        if (isLifecycleHook(hook)) {
+          // For lifecycle hooks, only execute the before method
+          if (hook.before) {
+            result = await hook.before(ctx);
+          } else {
+            // No before method, continue
+            continue;
+          }
+        } else {
+          // Legacy before hook
+          result = await hook(ctx);
+        }
 
         // If hook says stop, stop immediately
         if (!result.next) {

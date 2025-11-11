@@ -30,33 +30,41 @@ export { defineHook, composeHooks } from './shared/hooks';
 // ============================================================================
 
 /**
- * Detects which runtime is available (Express or Hono).
+ * Detects which runtime is available (Express, Hono, or Bun).
  * 
  * Checks for installed packages in order:
- * 1. Express
- * 2. Hono
+ * 1. Bun (via global Bun object)
+ * 2. Express
+ * 3. Hono
  * 
- * @returns Runtime type or null if neither is installed
+ * @returns Runtime type or null if none is detected
  * 
  * @example
  * ```typescript
  * const runtime = detectRuntime();
- * if (runtime === 'express') {
+ * if (runtime === 'bun') {
+ *   console.log('Using Bun');
+ * } else if (runtime === 'express') {
  *   console.log('Using Express');
  * } else if (runtime === 'hono') {
  *   console.log('Using Hono');
  * }
  * ```
  */
-export function detectRuntime(): 'express' | 'hono' | null {
+export function detectRuntime(): 'express' | 'hono' | 'bun' | null {
   // ESM-safe runtime detection
   // Prefer explicit configuration via env or options; avoid CommonJS require.
   const envRuntime = (typeof process !== 'undefined'
-    ? (process.env?.BRIDGE_RUNTIME as 'express' | 'hono' | undefined)
+    ? (process.env?.BRIDGE_RUNTIME as 'express' | 'hono' | 'bun' | undefined)
     : undefined);
 
-  if (envRuntime === 'express' || envRuntime === 'hono') {
+  if (envRuntime === 'express' || envRuntime === 'hono' || envRuntime === 'bun') {
     return envRuntime;
+  }
+
+  // Detect Bun runtime
+  if (typeof Bun !== 'undefined') {
+    return 'bun';
   }
 
   // Heuristic fallback: default to 'hono' to support ESM/SSR and Workers environments.
@@ -439,6 +447,7 @@ export class FullStackBridge {
 import type { BridgeConfig as NewBridgeConfig, SetupBridgeOptions as NewSetupBridgeOptions, RoutesCollection as NewRoutesCollection } from './shared/types';
 import { createExpressMiddleware } from './express';
 import { createHonoMiddleware } from './hono';
+import { createBunMiddleware } from './bun';
 
 /**
  * Sets up the bridge with automatic runtime detection and hooks support.
@@ -516,8 +525,10 @@ export function setupBridge<T extends LegacyRoutesCollection>(
   let middleware: any;
   if (runtime === 'express') {
     middleware = createExpressMiddleware(routesMap, config);
-  } else {
+  } else if (runtime === 'hono') {
     middleware = createHonoMiddleware(routesMap, config);
+  } else if (runtime === 'bun') {
+    middleware = createBunMiddleware(routesMap, config);
   }
 
   // Create metadata function

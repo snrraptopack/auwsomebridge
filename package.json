@@ -1,6 +1,6 @@
 {
   "name": "auwsomebridge",
-  "version": "0.0.7",
+  "version": "0.0.9",
   "private": false,
   "type": "module",
   "description": "Unified, runtime-agnostic API bridge for Express and Hono with validation and hooks",
@@ -11,6 +11,7 @@
     "hono",
     "hooks",
     "zod",
+    "bun",
     "runtime-agnostic"
   ],
   "engines": {
@@ -35,7 +36,9 @@
     "server": "bun run server/app-hono.ts",
     "server:express": "bun run server/app.ts",
     "server:hono": "bun run server/app-hono.ts",
-    "api:gen": "bun run scripts/generate-api.ts"
+    "api:gen": "bun run scripts/generate-api.ts",
+    "test": "bun test",
+    "test:watch": "bun test --watch"
   },
   "main": "./dist/bridge.js",
   "types": "./dist/bridge.d.ts",

@@ -173,3 +173,109 @@ export const createUserCacheHook = defineHook({
  * User-specific cache with 5 minute TTL
  */
 export const userCache = createUserCacheHook({ ttl: 300 });
+
+// ============================================================================
+// FULL LIFECYCLE CACHE HOOK
+// ============================================================================
+
+/**
+ * Creates a full lifecycle caching hook with before and after phases.
+ * 
+ * This hook:
+ * - Before: Checks cache and returns early if hit
+ * - After: Stores handler response in cache
+ * - Uses lifecycle methods for complete cache management
+ * 
+ * @example
+ * ```typescript
+ * // Create cache instances with different TTLs
+ * const apiCache = createFullCacheHook({ ttl: 300 }); // 5 minutes
+ * 
+ * // Use in routes
+ * export const apiRoutes = {
+ *   getData: defineRoute({
+ *     method: 'GET',
+ *     hooks: [apiCache],
+ *     handler: async ({ id }) => {
+ *       // This will be cached
+ *       return { id, data: await fetchData(id) };
+ *     }
+ *   })
+ * };
+ * ```
+ */
+export const createFullCacheHook = defineHook({
+  name: 'full-cache',
+  setup: (config: { ttl: number }) => {
+    const cache = new Map<string, { data: any; expires: number }>();
+    
+    // Cleanup expired entries periodically
+    const cleanupInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [key, value] of cache.entries()) {
+        if (value.expires < now) {
+          cache.delete(key);
+        }
+      }
+    }, config.ttl * 1000);
+    
+    return {
+      cache,
+      ttl: config.ttl,
+      cleanupInterval,
+    };
+  },
+  before: (ctx, state) => {
+    // Generate cache key from route and input
+    const cacheKey = `${ctx.route}:${JSON.stringify(ctx.input)}`;
+    const now = Date.now();
+    
+    // Check cache
+    const cached = state.cache.get(cacheKey);
+    if (cached && cached.expires > now) {
+      // Cache hit - return early, skip handler
+      return {
+        next: true,
+        response: cached.data,
+      };
+    }
+    
+    // Cache miss - store key for after hook
+    ctx.context.__cacheKey = cacheKey;
+    
+    // Continue to handler
+    return { next: true };
+  },
+  after: (ctx, state) => {
+    // Store response in cache
+    const cacheKey = ctx.context.__cacheKey;
+    if (cacheKey) {
+      state.cache.set(cacheKey, {
+        data: ctx.response,
+        expires: Date.now() + state.ttl * 1000,
+      });
+    }
+    
+    // Continue with current response
+    return { next: true };
+  },
+});
+
+/**
+ * Pre-configured full cache hooks
+ */
+
+/**
+ * Short-lived full cache: 60 seconds
+ */
+export const shortFullCache = createFullCacheHook({ ttl: 60 });
+
+/**
+ * Medium-lived full cache: 5 minutes
+ */
+export const mediumFullCache = createFullCacheHook({ ttl: 300 });
+
+/**
+ * Long-lived full cache: 1 hour
+ */
+export const longFullCache = createFullCacheHook({ ttl: 3600 });

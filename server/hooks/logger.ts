@@ -130,3 +130,60 @@ export const errorLoggerHook = defineHook({
     }
   },
 });
+
+// ============================================================================
+// METRICS HOOK WITH LIFECYCLE SUPPORT
+// ============================================================================
+
+/**
+ * Metrics hook that tracks request duration and outcome.
+ * 
+ * This hook uses lifecycle methods:
+ * - Before: Records start time
+ * - Cleanup: Calculates duration and logs metrics (always runs)
+ * 
+ * @example
+ * ```typescript
+ * export const userRoutes = {
+ *   getUser: defineRoute({
+ *     hooks: [metricsHook, authHook],
+ *     handler: async ({ id }) => {
+ *       return { id, name: 'John' };
+ *     }
+ *   })
+ * };
+ * ```
+ */
+export const metricsHook = defineHook({
+  name: 'metrics',
+  before: (ctx) => {
+    // Record start time
+    ctx.context.__metricsStartTime = Date.now();
+    return { next: true };
+  },
+  cleanup: (ctx) => {
+    // Calculate duration
+    const duration = Date.now() - (ctx.context.__metricsStartTime || Date.now());
+    const status = ctx.success ? 'success' : 'error';
+    const userId = ctx.context.userId || 'anonymous';
+    
+    // Log metrics
+    console.log(`[METRICS] ${ctx.method} ${ctx.route}`, {
+      duration: `${duration}ms`,
+      status,
+      userId,
+      statusCode: ctx.error?.status,
+    });
+    
+    // In production, you would send this to a metrics service
+    // recordMetric({
+    //   route: ctx.route,
+    //   method: ctx.method,
+    //   duration,
+    //   status,
+    //   userId,
+    // });
+    
+    return { next: true };
+  },
+});

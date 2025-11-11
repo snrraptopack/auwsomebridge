@@ -6,12 +6,11 @@ import { standardRateLimit, loggerHook } from './hooks';
 // Compose all route collections
 export const allRoutes = composeRoutes(userRoutes, healthRoutes);
 
-// Setup bridge with hooks support
-// Note: Runtime is auto-detected, but you can override with runtime: 'express' | 'hono' | 'bun'
-export const {middleware, metadata } = setupBridge(allRoutes, {
+// Setup bridge with Hono runtime explicitly
+export const { middleware, metadata } = setupBridge(allRoutes, {
+  runtime: 'hono', // Explicitly use Hono
   prefix: '/api',
   validateResponses: true,
-  logRequests: false, // Using loggerHook instead
-  // Global hooks applied to all routes
+  logRequests: false,
   hooks: [standardRateLimit, loggerHook],
 });

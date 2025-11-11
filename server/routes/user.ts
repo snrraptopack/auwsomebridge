@@ -5,17 +5,16 @@ import { authHook } from '../hooks';
 export const userRoutes = {
   getUserById: defineRoute({
     method: 'GET',
-    input: z.object({ id: z.string().uuid() }),
+    input: z.object({ id: z.string() }),
     output: z.object({
       id: z.string(),
       name: z.string(),
       email: z.string().email(),
     }),
-    // Use new hooks system instead of auth flag
-    hooks: [authHook],
+    hooks: [authHook], // Add auth hook back
     description: 'Fetch a user by ID',
     tags: ['users'],
-    handler: async ({ id }, context?:{userId:string}) => ({
+    handler: async ({ id }) => ({
       id,
       name: 'John Doe',
       email: 'john@example.com',

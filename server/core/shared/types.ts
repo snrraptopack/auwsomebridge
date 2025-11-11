@@ -45,7 +45,7 @@ export interface NormalizedRequest {
  * 
  * This union provides direct access to the underlying server runtime
  * without modifying its native objects. Use this for integrations that
- * require Hono `Context` or Express `req`/`res`.
+ * require Hono `Context`, Express `req`/`res`, or Bun `Request`.
  */
 export type PlatformContext =
   | {
@@ -61,6 +61,12 @@ export type PlatformContext =
       req: ExpressRequest;
       /** Native Express Response */
       res: ExpressResponse;
+    }
+  | {
+      /** Discriminator indicating Bun runtime */
+      type: 'bun';
+      /** Native Bun Request (Web API standard) */
+      req: Request;
     };
 
 /**
@@ -103,7 +109,7 @@ export type ApiResponse<T> = ApiSuccess<T> | ApiError;
 // ============================================================================
 
 /**
- * Result returned by hooks to control execution flow.
+ * Result returned by before hooks to control execution flow.
  * 
  * Hooks can:
  * - Continue to next hook: `{ next: true }`
@@ -116,7 +122,27 @@ export type HookResult =
   | { next: false; status: number; error: string };
 
 /**
- * Context object passed to hooks containing request info and mutable state.
+ * Result returned by after hooks.
+ * 
+ * After hooks can:
+ * - Continue with current response: `{ next: true }`
+ * - Replace response: `{ next: true, response: newData }`
+ * - Stop with error: `{ next: false, status: 500, error: 'Processing failed' }`
+ */
+export type AfterHookResult =
+  | { next: true }
+  | { next: true; response: any }
+  | { next: false; status: number; error: string };
+
+/**
+ * Result returned by cleanup hooks.
+ * 
+ * Cleanup hooks always continue (cannot modify response or stop execution).
+ */
+export type CleanupHookResult = { next: true };
+
+/**
+ * Context object passed to before hooks containing request info and mutable state.
  * 
  * @template TContext - Type of the context object (defaults to Record<string, any>)
  * 
@@ -124,7 +150,7 @@ export type HookResult =
  * ```typescript
  * const authHook = defineHook({
  *   name: 'auth',
- *   handler: async (ctx) => {
+ *   before: async (ctx) => {
  *     // Access request info
  *     const token = ctx.req.headers.authorization;
  *     
@@ -152,16 +178,74 @@ export interface HookContext<TContext = Record<string, any>> {
 }
 
 /**
- * Hook function signature.
+ * Context object passed to after hooks with response data.
  * 
- * A hook receives context and returns a result that controls execution flow.
+ * @template TContext - Type of the context object (defaults to Record<string, any>)
+ * 
+ * @example
+ * ```typescript
+ * const wrapperHook = defineHook({
+ *   name: 'wrapper',
+ *   after: async (ctx) => {
+ *     // Access handler response
+ *     return {
+ *       next: true,
+ *       response: {
+ *         data: ctx.response,
+ *         timestamp: Date.now(),
+ *       },
+ *     };
+ *   }
+ * });
+ * ```
+ */
+export interface AfterHookContext<TContext = Record<string, any>> extends HookContext<TContext> {
+  /** Handler response data */
+  response: any;
+}
+
+/**
+ * Context object passed to cleanup hooks with outcome information.
+ * 
+ * @template TContext - Type of the context object (defaults to Record<string, any>)
+ * 
+ * @example
+ * ```typescript
+ * const auditHook = defineHook({
+ *   name: 'audit',
+ *   cleanup: async (ctx) => {
+ *     console.log(`Request ${ctx.success ? 'succeeded' : 'failed'}`);
+ *     if (ctx.error) {
+ *       console.log(`Error: ${ctx.error.message}`);
+ *     }
+ *     return { next: true };
+ *   }
+ * });
+ * ```
+ */
+export interface CleanupHookContext<TContext = Record<string, any>> extends HookContext<TContext> {
+  /** Whether the request succeeded */
+  success: boolean;
+  /** Final response data (if successful) */
+  response?: any;
+  /** Error information (if failed) */
+  error?: {
+    status: number;
+    message: string;
+  };
+}
+
+/**
+ * Before hook function signature.
+ * 
+ * A before hook receives context and returns a result that controls execution flow.
  * 
  * @param ctx - Hook context containing request info and mutable state
  * @returns Hook result indicating whether to continue, stop, or return early
  * 
  * @example
  * ```typescript
- * const myHook: RouteHook = async (ctx) => {
+ * const myBeforeHook: BeforeHook = async (ctx) => {
  *   if (!ctx.req.headers.authorization) {
  *     return { next: false, status: 401, error: 'Unauthorized' };
  *   }
@@ -169,17 +253,95 @@ export interface HookContext<TContext = Record<string, any>> {
  * };
  * ```
  */
-export type RouteHook = (ctx: HookContext) => HookResult | Promise<HookResult>;
+export type BeforeHook = (ctx: HookContext) => HookResult | Promise<HookResult>;
 
 /**
- * Hook definition configuration.
+ * After hook function signature.
+ * 
+ * An after hook receives context with response data and can transform the response.
+ * 
+ * @param ctx - After hook context containing request info, mutable state, and response
+ * @returns After hook result indicating whether to continue, replace response, or error
+ * 
+ * @example
+ * ```typescript
+ * const myAfterHook: AfterHook = async (ctx) => {
+ *   return {
+ *     next: true,
+ *     response: {
+ *       data: ctx.response,
+ *       timestamp: Date.now(),
+ *     },
+ *   };
+ * };
+ * ```
+ */
+export type AfterHook = (ctx: AfterHookContext) => AfterHookResult | Promise<AfterHookResult>;
+
+/**
+ * Cleanup hook function signature.
+ * 
+ * A cleanup hook always executes at the end, regardless of success or failure.
+ * It has read-only access to the outcome and cannot modify the response.
+ * 
+ * @param ctx - Cleanup hook context containing request info, mutable state, and outcome
+ * @returns Cleanup hook result (always continues)
+ * 
+ * @example
+ * ```typescript
+ * const myCleanupHook: CleanupHook = async (ctx) => {
+ *   console.log(`Request completed: ${ctx.success ? 'success' : 'error'}`);
+ *   return { next: true };
+ * };
+ * ```
+ */
+export type CleanupHook = (ctx: CleanupHookContext) => CleanupHookResult | Promise<CleanupHookResult>;
+
+/**
+ * A lifecycle hook with optional before, after, and cleanup methods.
+ * 
+ * @example
+ * ```typescript
+ * const lifecycleHook: LifecycleHook = {
+ *   __hookName: 'my-hook',
+ *   __isLifecycleHook: true,
+ *   before: async (ctx) => { return { next: true }; },
+ *   after: async (ctx) => { return { next: true }; },
+ *   cleanup: async (ctx) => { return { next: true }; },
+ * };
+ * ```
+ */
+export interface LifecycleHook {
+  /** Hook name for debugging and logging */
+  __hookName: string;
+  /** Marker to identify lifecycle hooks */
+  __isLifecycleHook: true;
+  /** Optional before hook */
+  before?: BeforeHook;
+  /** Optional after hook */
+  after?: AfterHook;
+  /** Optional cleanup hook */
+  cleanup?: CleanupHook;
+}
+
+/**
+ * Union type for all hook types.
+ * 
+ * A route hook can be either:
+ * - A simple before hook function (legacy, backward compatible)
+ * - A lifecycle hook object with before/after/cleanup methods
+ */
+export type RouteHook = BeforeHook | LifecycleHook;
+
+/**
+ * Hook definition configuration with lifecycle support.
  * 
  * @template TConfig - Configuration type for the hook (void if no config needed)
  * @template TState - State type returned by setup function
  * 
  * @example
  * ```typescript
- * // Hook without config
+ * // Legacy hook (backward compatible)
  * const loggerDef: HookDefinition = {
  *   name: 'logger',
  *   handler: (ctx) => {
@@ -188,15 +350,37 @@ export type RouteHook = (ctx: HookContext) => HookResult | Promise<HookResult>;
  *   }
  * };
  * 
- * // Hook with config and state
- * const rateLimitDef: HookDefinition<{ max: number }> = {
- *   name: 'rateLimit',
- *   setup: (config) => ({ counter: 0, max: config.max }),
- *   handler: (ctx, state) => {
- *     state.counter++;
- *     if (state.counter > state.max) {
- *       return { next: false, status: 429, error: 'Too many requests' };
- *     }
+ * // Lifecycle hook with all phases
+ * const fullHookDef: HookDefinition = {
+ *   name: 'full-hook',
+ *   before: (ctx) => {
+ *     console.log('Before handler');
+ *     return { next: true };
+ *   },
+ *   after: (ctx) => {
+ *     console.log('After handler');
+ *     return { next: true };
+ *   },
+ *   cleanup: (ctx) => {
+ *     console.log('Cleanup');
+ *     return { next: true };
+ *   }
+ * };
+ * 
+ * // Lifecycle hook with config and state
+ * const cacheHookDef: HookDefinition<{ ttl: number }> = {
+ *   name: 'cache',
+ *   setup: (config) => ({
+ *     cache: new Map(),
+ *     ttl: config.ttl
+ *   }),
+ *   before: (ctx, state) => {
+ *     const cached = state.cache.get(ctx.route);
+ *     if (cached) return { next: true, response: cached };
+ *     return { next: true };
+ *   },
+ *   after: (ctx, state) => {
+ *     state.cache.set(ctx.route, ctx.response);
  *     return { next: true };
  *   }
  * };
@@ -208,16 +392,28 @@ export type HookDefinition<TConfig = void, TState = any> =
       name: string;
       /** Setup function to initialize state (called once per hook instance) */
       setup: (config: TConfig) => TState;
-      /** Hook handler function that processes requests with state */
-      handler: (ctx: HookContext, state: TState) => HookResult | Promise<HookResult>;
+      /** Legacy: single handler (treated as before hook, backward compatible) */
+      handler?: (ctx: HookContext, state: TState) => HookResult | Promise<HookResult>;
+      /** Before hook: executes before the route handler */
+      before?: (ctx: HookContext, state: TState) => HookResult | Promise<HookResult>;
+      /** After hook: executes after the route handler succeeds */
+      after?: (ctx: AfterHookContext, state: TState) => AfterHookResult | Promise<AfterHookResult>;
+      /** Cleanup hook: always executes at the end */
+      cleanup?: (ctx: CleanupHookContext, state: TState) => CleanupHookResult | Promise<CleanupHookResult>;
     }
   | {
       /** Hook name for debugging and logging */
       name: string;
       /** No setup function */
       setup?: never;
-      /** Hook handler function that processes requests without state */
-      handler: (ctx: HookContext) => HookResult | Promise<HookResult>;
+      /** Legacy: single handler (treated as before hook, backward compatible) */
+      handler?: (ctx: HookContext) => HookResult | Promise<HookResult>;
+      /** Before hook: executes before the route handler */
+      before?: (ctx: HookContext) => HookResult | Promise<HookResult>;
+      /** After hook: executes after the route handler succeeds */
+      after?: (ctx: AfterHookContext) => AfterHookResult | Promise<AfterHookResult>;
+      /** Cleanup hook: always executes at the end */
+      cleanup?: (ctx: CleanupHookContext) => CleanupHookResult | Promise<CleanupHookResult>;
     };
 
 // ============================================================================
@@ -385,7 +581,7 @@ export interface BridgeConfig {
  * Runtime type for the bridge.
  * Determines which server framework to use.
  */
-export type Runtime = 'express' | 'hono';
+export type Runtime = 'express' | 'hono' | 'bun';
 
 /**
  * Extended bridge configuration with runtime options.

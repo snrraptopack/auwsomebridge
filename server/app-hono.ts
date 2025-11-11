@@ -1,13 +1,13 @@
 import { Hono } from 'hono';
 import type { EnvBindings } from './types/env';
-import { middleware } from './shared';
+import { middleware } from './shared-hono';
 
 const app = new Hono<{ Bindings: EnvBindings }>();
 
 // Mount the bridge middleware at /api/:route
 app.use('/api/:route', middleware);
 
-const port = 3000;
+const port = 3001;
 
 console.log(`API server listening at http://localhost:${port}`);
 
