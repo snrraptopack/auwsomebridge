@@ -1,8 +1,8 @@
 {
   "name": "create-auwsomebridge",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "private": false,
-  "description": "CLI to scaffold auwsomebridge templates for Express or Hono",
+  "description": "CLI to scaffold auwsomebridge templates for Express, Hono, or Bun",
   "bin": {
     "create-auwsomebridge": "./bin.js"
   },
@@ -15,8 +15,10 @@
     "scaffold",
     "express",
     "hono",
+    "bun",
     "api",
-    "templates"
+    "templates",
+    "typescript"
   ],
   "engines": {
     "node": ">=18"

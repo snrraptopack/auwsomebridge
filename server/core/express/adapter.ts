@@ -125,8 +125,20 @@ export function createExpressMiddleware(
 
       // Handle execution result
       if (!result.success) {
+        // Map status code to appropriate error code
+        let errorCode: string = ErrorCode.INTERNAL_ERROR;
+        if (result.status === HttpStatus.UNAUTHORIZED) {
+          errorCode = ErrorCode.UNAUTHORIZED;
+        } else if (result.status === HttpStatus.FORBIDDEN) {
+          errorCode = ErrorCode.FORBIDDEN;
+        } else if (result.status === HttpStatus.NOT_FOUND) {
+          errorCode = ErrorCode.NOT_FOUND;
+        } else if (result.status === HttpStatus.TOO_MANY_REQUESTS) {
+          errorCode = ErrorCode.TOO_MANY_REQUESTS;
+        }
+        
         const errorResponse = formatErrorResponse(
-          ErrorCode.INTERNAL_ERROR,
+          errorCode,
           result.error,
           { status: result.status }
         );

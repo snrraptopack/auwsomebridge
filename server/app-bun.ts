@@ -3,11 +3,8 @@ import index from "../manual-test/index.html"
 
 // Bun.serve with bridge middleware
 Bun.serve({
-  port: 3000,
+  port: 3005,
   fetch: middleware,
-  routes:{
-    "/*": index
-  }
 });
 
 console.log(`🚀 Bun API server listening at http://localhost:3000`);
