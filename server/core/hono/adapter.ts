@@ -142,7 +142,6 @@ export function createHonoMiddleware(
       // Combine global and route hooks
       const allHooks = executor.combineHooks(globalHooks, routeDef.hooks);
 
-      // Execute hooks and handler
       const result = await executor.execute(allHooks, routeDef.handler as any, hookContext);
 
       // Handle execution result
@@ -168,11 +167,50 @@ export function createHonoMiddleware(
         return c.json(errorResponse);
       }
 
-      // Validate output if enabled
+      if (routeDef.kind === 'sse') {
+        const data = result.data as any;
+        const isAsyncIterable = data && typeof data === 'object' && Symbol.asyncIterator in data;
+        if (!isAsyncIterable) {
+          const errorResponse = formatErrorResponse(
+            ErrorCode.INTERNAL_ERROR,
+            'SSE handler must return AsyncIterable',
+            {}
+          );
+          c.status(toStatusCode(HttpStatus.INTERNAL_SERVER_ERROR));
+          return c.json(errorResponse);
+        }
+        const stream = new ReadableStream({
+          start(controller) {
+            (async () => {
+              try {
+                for await (const ev of data as AsyncIterable<any>) {
+                  const s = typeof ev === 'string' ? ev : JSON.stringify(ev);
+                  controller.enqueue(new TextEncoder().encode(`data: ${s}\n\n`));
+                }
+              } catch (e) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `event: error\n` +
+                      `data: ${JSON.stringify({ message: (e as any)?.message || 'stream error' })}\n\n`
+                  )
+                );
+              } finally {
+                controller.close();
+              }
+            })();
+          },
+        });
+        const headers = new Headers({
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        return new Response(stream, { headers });
+      }
+
       if (routeDef.output && config.validateResponses) {
         const validation = validateOutput(routeDef.output, result.data);
         if (!validation.success) {
-          console.error('Output validation failed:', validation.errors);
           const errorResponse = formatErrorResponse(
             ErrorCode.INTERNAL_ERROR,
             'Output validation failed (server bug)',
@@ -182,8 +220,6 @@ export function createHonoMiddleware(
           return c.json(errorResponse);
         }
       }
-
-      // Send success response
       return sendHonoSuccess(c, result.data);
     } catch (error) {
       console.error('Hono adapter error:', error);

@@ -7,10 +7,12 @@ import { standardRateLimit, loggerHook } from './hooks';
 export const allRoutes = composeRoutes(userRoutes, healthRoutes);
 
 // Setup bridge with Bun runtime explicitly
-export const { middleware, metadata } = setupBridge(allRoutes, {
+export const { $api,$sse,middleware, metadata } = setupBridge(allRoutes, {
   runtime: 'bun', // Explicitly use Bun
   prefix: '/api',
   validateResponses: true,
   logRequests: false,
   hooks: [standardRateLimit, loggerHook],
 });
+
+

@@ -120,7 +120,6 @@ export function createExpressMiddleware(
       // Combine global and route hooks
       const allHooks = executor.combineHooks(globalHooks, routeDef.hooks);
 
-      // Execute hooks and handler
       const result = await executor.execute(allHooks, routeDef.handler as any, hookContext);
 
       // Handle execution result
@@ -145,11 +144,36 @@ export function createExpressMiddleware(
         return res.status(result.status).json(errorResponse);
       }
 
-      // Validate output if enabled
+      if (routeDef.kind === 'sse') {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        const data = result.data as any;
+        const isAsyncIterable = data && typeof data === 'object' && Symbol.asyncIterator in data;
+        if (!isAsyncIterable) {
+          const errorResponse = formatErrorResponse(
+            ErrorCode.INTERNAL_ERROR,
+            'SSE handler must return AsyncIterable',
+            {}
+          );
+          return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json(errorResponse);
+        }
+        try {
+          for await (const ev of data as AsyncIterable<any>) {
+            const s = typeof ev === 'string' ? ev : JSON.stringify(ev);
+            res.write(`data: ${s}\n\n`);
+          }
+        } catch (e) {
+          res.write(`event: error\n`);
+          res.write(`data: ${JSON.stringify({ message: (e as any)?.message || 'stream error' })}\n\n`);
+        }
+        res.end();
+        return;
+      }
+
       if (routeDef.output && config.validateResponses) {
         const validation = validateOutput(routeDef.output, result.data);
         if (!validation.success) {
-          console.error('Output validation failed:', validation.errors);
           const errorResponse = formatErrorResponse(
             ErrorCode.INTERNAL_ERROR,
             'Output validation failed (server bug)',
@@ -158,8 +182,6 @@ export function createExpressMiddleware(
           return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json(errorResponse);
         }
       }
-
-      // Send success response
       return sendExpressSuccess(res, result.data);
     } catch (error) {
       console.error('Express adapter error:', error);

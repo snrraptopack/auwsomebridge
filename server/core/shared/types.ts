@@ -1,6 +1,4 @@
 import { z } from 'zod';
-import type { Context as HonoContext } from 'hono';
-import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 
 // ============================================================================
 // HTTP TYPES
@@ -52,15 +50,15 @@ export type PlatformContext =
       /** Discriminator indicating Hono runtime */
       type: 'hono';
       /** Native Hono Context (includes env, req, executionCtx, etc.) */
-      c: HonoContext;
+      c: any;
     }
   | {
       /** Discriminator indicating Express runtime */
       type: 'express';
       /** Native Express Request */
-      req: ExpressRequest;
+      req: any;
       /** Native Express Response */
-      res: ExpressResponse;
+      res: any;
     }
   | {
       /** Discriminator indicating Bun runtime */
@@ -497,6 +495,7 @@ export interface RouteDefinition<
   description?: string;
   /** Tags for grouping routes */
   tags?: string[];
+  kind?: 'http' | 'sse';
 }
 
 /**

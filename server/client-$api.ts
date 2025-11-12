@@ -8,7 +8,7 @@ const allRoutes = composeRoutes(userRoutes, healthRoutes);
 
 // Setup bridge for client-side API calls only
 // No runtime/middleware needed for client
-export const { $api } = setupBridge(allRoutes, {
+export const { $api, $sse } = setupBridge(allRoutes, {
   prefix: '/api',
   baseUrl: '/api', // Use relative URL for same-origin requests
 });

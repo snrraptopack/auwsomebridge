@@ -126,6 +126,7 @@ export interface LegacyRouteDefinition<
   description?: string;
   tags?: string[];
   hooks?: any[]; // Added for new hook system
+  kind?: 'sse' | 'http';
 }
 
 /**
@@ -166,6 +167,7 @@ export function defineRoute<
   hooks?: any[];
   description?: string;
   tags?: string[];
+  kind?: 'sse' | 'http';
 }): LegacyRouteDefinition<I, O, C> {
   return def as LegacyRouteDefinition<I, O, C>;
 }
@@ -547,6 +549,7 @@ export function setupBridge<T extends LegacyRoutesCollection>(
 
   // Create client API (runtime-agnostic, uses legacy bridge for now)
   let $api: ExtractRoutes<T>;
+  let $sse: Record<string, any> = {};
   try {
     const bridge = new FullStackBridge(options);
     const defined = bridge.defineRoutes(routes);
@@ -554,15 +557,95 @@ export function setupBridge<T extends LegacyRoutesCollection>(
       baseUrl: options?.baseUrl ?? options?.prefix ?? '/api',
       onError: options?.clientOptions?.onError,
     });
+
+    // Build SSE helpers for routes with kind === 'sse'
+    const baseUrl = options?.baseUrl ?? options?.prefix ?? '/api';
+    Object.entries(defined.__routes).forEach(([routeName, def]: any) => {
+      if (def?.kind === 'sse') {
+        const expectedMethod = def.method ?? 'GET';
+        $sse[routeName] = (input?: Record<string, unknown>, handlers?: {
+          onMessage?: (data: any) => void;
+          onError?: (err: unknown) => void;
+          onOpen?: () => void;
+        }) => {
+          let url = `${baseUrl}/${routeName}`;
+          if (expectedMethod === 'GET' && input && typeof input === 'object') {
+            const params = new URLSearchParams();
+            for (const [k, v] of Object.entries(input)) {
+              if (v === undefined || v === null) continue;
+              params.append(k, String(v));
+            }
+            const qs = params.toString();
+            if (qs) url += `?${qs}`;
+          }
+
+          if (typeof globalThis !== 'undefined' && (globalThis as any).EventSource) {
+            const es = new (globalThis as any).EventSource(url);
+            if (handlers?.onOpen) es.onopen = () => handlers.onOpen?.();
+            if (handlers?.onMessage) es.onmessage = (e: any) => {
+              try {
+                handlers.onMessage?.(JSON.parse(e.data));
+              } catch {
+                handlers.onMessage?.(e.data);
+              }
+            };
+            if (handlers?.onError) es.onerror = (e: any) => handlers.onError?.(e);
+            return { close: () => es.close(), es };
+          }
+
+          const controller = new AbortController();
+          (async () => {
+            try {
+              const res = await fetch(url, {
+                method: 'GET',
+                headers: { Accept: 'text/event-stream' },
+                signal: controller.signal,
+              });
+              const reader = (res.body as any).getReader?.();
+              const decoder = new TextDecoder();
+              let buffer = '';
+              handlers?.onOpen?.();
+
+              for (;;) {
+                const chunk = reader ? await reader.read() : null;
+                if (!chunk || chunk.done) break;
+                buffer += decoder.decode(chunk.value, { stream: true });
+                let idx;
+                while ((idx = buffer.indexOf('\n\n')) !== -1) {
+                  const raw = buffer.slice(0, idx);
+                  buffer = buffer.slice(idx + 2);
+                  const lines = raw.split('\n');
+                  const dataLines = lines.filter((l) => l.startsWith('data:'));
+                  const joined = dataLines.map((l) => l.slice(5).trimStart()).join('\n');
+                  if (joined) {
+                    try {
+                      handlers?.onMessage?.(JSON.parse(joined));
+                    } catch {
+                      handlers?.onMessage?.(joined);
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              handlers?.onError?.(e);
+            }
+          })();
+
+          return { close: () => controller.abort(), es: undefined };
+        };
+      }
+    });
   } catch (error) {
     // If FullStackBridge fails (missing Express types), create a simple client
     console.warn('Client API creation failed, using fallback');
     $api = {} as ExtractRoutes<T>;
+    $sse = {};
   }
 
   return {
     middleware,
     metadata,
     $api,
+    $sse,
   };
 }
