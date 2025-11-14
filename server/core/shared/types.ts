@@ -415,6 +415,181 @@ export type HookDefinition<TConfig = void, TState = any> =
     };
 
 // ============================================================================
+// WEBSOCKET TYPES
+// ============================================================================
+
+/**
+ * WebSocket connection context providing methods to interact with the connection.
+ * 
+ * This interface abstracts the differences between Express (ws), Hono, and Bun
+ * WebSocket implementations, providing a unified API for handlers.
+ * 
+ * @template TContext - Type of the hook-populated context object
+ * 
+ * @example
+ * ```typescript
+ * const handler: WebSocketHandler = {
+ *   onMessage: async (message, connection) => {
+ *     console.log(`Received from ${connection.id}:`, message);
+ *     connection.send({ type: 'echo', data: message });
+ *   }
+ * };
+ * ```
+ */
+export interface WebSocketConnection<TContext = any> {
+  /** 
+   * Send a message to the client.
+   * 
+   * @param data - Message data (string, object, ArrayBuffer, TypedArray)
+   * @param compress - Enable compression for this message (Bun only)
+   * @returns void (Express/Hono) or number (Bun: -1=backpressure, 0=dropped, 1+=bytes sent)
+   * 
+   * @example
+   * ```typescript
+   * connection.send({ type: 'notification', message: 'Hello' });
+   * connection.send('Plain text message');
+   * connection.send(new Uint8Array([1, 2, 3]));
+   * ```
+   */
+  send: (data: any, compress?: boolean) => void;
+  
+  /** 
+   * Close the connection with optional code and reason.
+   * 
+   * @param code - WebSocket close code (default: 1000)
+   * @param reason - Human-readable close reason
+   * 
+   * @example
+   * ```typescript
+   * connection.close(); // Normal closure
+   * connection.close(1008, 'Policy violation');
+   * ```
+   */
+  close: (code?: number, reason?: string) => void;
+  
+  /** Unique connection identifier */
+  readonly id: string;
+  
+  /** Client IP address (if available) */
+  readonly ip?: string;
+  
+  /** Request headers from WebSocket handshake */
+  readonly headers: Record<string, string | string[] | undefined>;
+  
+  /** Hook-populated context object */
+  readonly context: TContext;
+  
+  /** 
+   * Native platform WebSocket for advanced use cases.
+   * 
+   * - Express: ws.WebSocket
+   * - Hono: Hono WebSocket
+   * - Bun: ServerWebSocket (with pub/sub API)
+   * 
+   * @example
+   * ```typescript
+   * // Bun pub/sub
+   * const ws = connection.raw as ServerWebSocket;
+   * ws.subscribe('chat-room');
+   * ws.publish('chat-room', 'Hello everyone');
+   * ```
+   */
+  readonly raw: any;
+}
+
+/**
+ * WebSocket message handler function.
+ * 
+ * Called when a message is received from the client.
+ * 
+ * @template TInput - Type of the validated message data
+ * @template TContext - Type of the hook-populated context
+ * 
+ * @param message - Validated message data
+ * @param connection - WebSocket connection context
+ * 
+ * @example
+ * ```typescript
+ * const onMessage: WebSocketMessageHandler<{ text: string }> = async (message, connection) => {
+ *   console.log(`User ${connection.context.userId} sent:`, message.text);
+ *   connection.send({ type: 'ack', messageId: message.id });
+ * };
+ * ```
+ */
+export type WebSocketMessageHandler<TInput = any, TContext = any> = (
+  message: TInput,
+  connection: WebSocketConnection<TContext>
+) => void | Promise<void>;
+
+/**
+ * WebSocket handler configuration with lifecycle methods.
+ * 
+ * Defines callbacks for WebSocket connection lifecycle events.
+ * 
+ * @template TInput - Type of the validated message data
+ * @template TContext - Type of the hook-populated context
+ * 
+ * @example
+ * ```typescript
+ * const chatHandler: WebSocketHandler = {
+ *   onOpen: async (connection) => {
+ *     console.log(`User ${connection.context.userId} connected`);
+ *     connection.send({ type: 'welcome', message: 'Welcome to chat!' });
+ *   },
+ *   onMessage: async (message, connection) => {
+ *     // Broadcast to all users
+ *     broadcastMessage(message, connection.context.userId);
+ *   },
+ *   onClose: async (connection, code, reason) => {
+ *     console.log(`User ${connection.context.userId} disconnected: ${reason}`);
+ *   },
+ *   onError: async (connection, error) => {
+ *     console.error(`Error for user ${connection.context.userId}:`, error);
+ *   }
+ * };
+ * ```
+ */
+export interface WebSocketHandler<TInput = any, TContext = any> {
+  /** 
+   * Called when connection is established (after hooks).
+   * 
+   * Use this to send initial data or subscribe to topics.
+   * 
+   * @param connection - WebSocket connection context
+   */
+  onOpen?: (connection: WebSocketConnection<TContext>) => void | Promise<void>;
+  
+  /** 
+   * Called when a message is received (required).
+   * 
+   * Messages are validated against the route's input schema before this is called.
+   * 
+   * @param message - Validated message data
+   * @param connection - WebSocket connection context
+   */
+  onMessage: WebSocketMessageHandler<TInput, TContext>;
+  
+  /** 
+   * Called when connection closes.
+   * 
+   * Cleanup hooks are executed after this callback.
+   * 
+   * @param connection - WebSocket connection context
+   * @param code - WebSocket close code
+   * @param reason - Close reason string
+   */
+  onClose?: (connection: WebSocketConnection<TContext>, code: number, reason: string) => void | Promise<void>;
+  
+  /** 
+   * Called when an error occurs.
+   * 
+   * @param connection - WebSocket connection context
+   * @param error - Error object
+   */
+  onError?: (connection: WebSocketConnection<TContext>, error: Error) => void | Promise<void>;
+}
+
+// ============================================================================
 // ROUTE TYPES
 // ============================================================================
 
@@ -465,6 +640,7 @@ export type OutputData<O extends z.ZodTypeAny | undefined> = O extends z.ZodType
  * 
  * @example
  * ```typescript
+ * // HTTP route
  * const getUserRoute: RouteDefinition = {
  *   method: 'GET',
  *   input: z.object({ id: z.string() }),
@@ -474,6 +650,19 @@ export type OutputData<O extends z.ZodTypeAny | undefined> = O extends z.ZodType
  *     return { id, name: 'John Doe' };
  *   }
  * };
+ * 
+ * // WebSocket route
+ * const chatRoute: RouteDefinition = {
+ *   method: 'GET',
+ *   kind: 'ws',
+ *   input: z.object({ message: z.string() }),
+ *   hooks: [authHook],
+ *   handler: {
+ *     onMessage: async (message, connection) => {
+ *       connection.send({ echo: message.message });
+ *     }
+ *   }
+ * };
  * ```
  */
 export interface RouteDefinition<
@@ -481,21 +670,22 @@ export interface RouteDefinition<
   O extends z.ZodTypeAny | undefined = undefined,
   C = unknown
 > {
-  /** HTTP method (defaults to POST) */
+  /** HTTP method (defaults to POST for HTTP, GET for WebSocket) */
   method?: HttpMethod;
-  /** Input validation schema */
+  /** Input validation schema (query params for WebSocket handshake, messages for WebSocket runtime) */
   input?: I;
-  /** Output validation schema */
+  /** Output validation schema (not used for WebSocket) */
   output?: O;
-  /** Route handler function */
-  handler: RouteHandler<ParsedInput<I>, OutputData<O>, C>;
+  /** Route handler function (HTTP/SSE) or WebSocket handler object (WebSocket) */
+  handler: RouteHandler<ParsedInput<I>, OutputData<O>, C> | WebSocketHandler<ParsedInput<I>, C>;
   /** Route-specific hooks (executed after global hooks) */
   hooks?: RouteHook[];
   /** Route description for documentation */
   description?: string;
   /** Tags for grouping routes */
   tags?: string[];
-  kind?: 'http' | 'sse';
+  /** Route kind: 'http' (default), 'sse' (Server-Sent Events), or 'ws' (WebSocket) */
+  kind?: 'http' | 'sse' | 'ws';
 }
 
 /**

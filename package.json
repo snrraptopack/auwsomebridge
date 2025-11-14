@@ -1,6 +1,6 @@
 {
   "name": "auwsomebridge",
-  "version": "0.0.10",
+  "version": "0.1.1",
   "private": false,
   "type": "module",
   "description": "Unified, runtime-agnostic API bridge for Express and Hono with validation and hooks",

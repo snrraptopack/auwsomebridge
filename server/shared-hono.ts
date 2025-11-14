@@ -1,13 +1,14 @@
 import { composeRoutes, setupBridge } from './core/bridge';
 import { userRoutes } from './routes/user';
 import { healthRoutes } from './routes/health';
+import { chatRoutes } from './routes/chat';
 import { standardRateLimit, loggerHook } from './hooks';
 
 // Compose all route collections
-export const allRoutes = composeRoutes(userRoutes, healthRoutes);
+export const allRoutes = composeRoutes(userRoutes, healthRoutes, chatRoutes);
 
 // Setup bridge with Hono runtime explicitly
-export const { middleware, metadata } = setupBridge(allRoutes, {
+export const { $api, $sse, $ws, middleware, metadata } = setupBridge(allRoutes, {
   runtime: 'hono', // Explicitly use Hono
   prefix: '/api',
   validateResponses: true,

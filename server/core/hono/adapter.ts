@@ -1,6 +1,6 @@
 import type { Context, MiddlewareHandler } from 'hono';
 import type { StatusCode } from 'hono/utils/http-status';
-import type { RouteDefinition, BridgeConfig, HookContext } from '../shared/types';
+import type { RouteDefinition, BridgeConfig, HookContext, WebSocketHandler } from '../shared/types';
 import { HookExecutor } from '../shared/executor';
 import { validateInput, validateOutput } from '../shared/validation';
 import {
@@ -10,6 +10,7 @@ import {
 } from '../shared/response';
 import { HttpStatus, ErrorCode } from '../shared/error';
 import { normalizeHonoContext } from './normalize';
+import { WebSocketConnectionImpl, generateConnectionId } from '../shared/websocket';
 
 // ============================================================================
 // HONO ADAPTER
@@ -67,6 +68,11 @@ export function createHonoMiddleware(
           ErrorCode.ROUTE_NOT_FOUND,
           `Route ${routeName} not found`
         );
+      }
+
+      // Handle WebSocket routes
+      if (routeDef.kind === 'ws') {
+        return handleHonoWebSocket(c, routeName, routeDef, config, executor, globalHooks);
       }
 
       // Validate HTTP method
@@ -136,6 +142,7 @@ export function createHonoMiddleware(
         route: routeName,
         input,
         // Inject env via context and expose platform to handlers
+        // env will be typed according to EnvBindings interface
         context: { env: (c as any)?.env, platform },
       };
 
@@ -309,4 +316,319 @@ function extractRouteFromUrl(url: string, prefix?: string): string | null {
   const prefixPattern = cleanPrefix.replace(/\//g, '\\/');
   const match = path.match(new RegExp(`${prefixPattern}/([^/]+)`));
   return match ? match[1] : null;
+}
+
+// ============================================================================
+// WEBSOCKET SUPPORT
+// ============================================================================
+
+/**
+ * Handles WebSocket routes in Hono.
+ * 
+ * Uses Hono's upgradeWebSocket() helper to create a WebSocket handler.
+ * 
+ * @param c - Hono context
+ * @param routeName - Route name
+ * @param routeDef - Route definition
+ * @param config - Bridge configuration
+ * @param executor - Hook executor
+ * @param globalHooks - Global hooks
+ * @returns WebSocket upgrade response
+ * 
+ * @internal
+ */
+async function handleHonoWebSocket(
+  c: Context,
+  routeName: string,
+  routeDef: RouteDefinition,
+  config: BridgeConfig,
+  executor: HookExecutor,
+  globalHooks: any[]
+): Promise<Response> {
+  // Import upgradeWebSocket dynamically
+  let upgradeWebSocket: any;
+  try {
+    upgradeWebSocket = require('hono/websocket').upgradeWebSocket;
+  } catch (error) {
+    return sendHonoError(
+      c,
+      HttpStatus.INTERNAL_SERVER_ERROR,
+      ErrorCode.INTERNAL_ERROR,
+      'WebSocket support requires hono/websocket. Install it with: npm install hono'
+    );
+  }
+
+  // Validate that handler is a WebSocket handler
+  const wsHandler = routeDef.handler as WebSocketHandler;
+  if (typeof wsHandler !== 'object' || !wsHandler.onMessage) {
+    return sendHonoError(
+      c,
+      HttpStatus.INTERNAL_SERVER_ERROR,
+      ErrorCode.INTERNAL_ERROR,
+      'Invalid WebSocket handler'
+    );
+  }
+
+  // Extract and validate query parameters (handshake input)
+  const url = new URL(c.req.url);
+  const query: Record<string, string | string[]> = {};
+  url.searchParams.forEach((value, key) => {
+    const existing = query[key];
+    if (existing) {
+      if (Array.isArray(existing)) {
+        existing.push(value);
+      } else {
+        query[key] = [existing, value];
+      }
+    } else {
+      query[key] = value;
+    }
+  });
+
+  let input: unknown = query;
+
+  // Validate query parameters if input schema is defined
+  if (routeDef.input) {
+    const validation = validateInput(routeDef.input, input);
+    if (!validation.success) {
+      return sendHonoError(
+        c,
+        HttpStatus.BAD_REQUEST,
+        ErrorCode.VALIDATION_ERROR,
+        'Validation error',
+        { issues: validation.errors }
+      );
+    }
+    input = validation.data;
+  }
+
+  // Log request if enabled
+  if (config.logRequests) {
+    console.log(`[WS] ${routeName} - Connection request`);
+  }
+
+  // Normalize request
+  const normalizedReq = normalizeHonoContext(c);
+  normalizedReq.body = input;
+
+  // Create platform context and hook context
+  const platform = { type: 'hono' as const, c };
+  const hookContext: HookContext = {
+    req: normalizedReq,
+    platform,
+    method: 'GET',
+    route: routeName,
+    input,
+    context: { env: (c as any)?.env, platform },
+  };
+
+  // Execute before hooks
+  const allHooks = executor.combineHooks(globalHooks, routeDef.hooks);
+  const { before, cleanup } = extractLifecycleMethods(allHooks);
+
+  // Run before hooks
+  for (const hook of before) {
+    try {
+      const result = await hook(hookContext);
+      if (!result.next) {
+        return sendHonoError(
+          c,
+          HttpStatus.UNAUTHORIZED,
+          ErrorCode.UNAUTHORIZED,
+          result.error
+        );
+      }
+    } catch (error) {
+      console.error('WebSocket before hook error:', error);
+      return sendHonoError(
+        c,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+        ErrorCode.INTERNAL_ERROR,
+        'Hook execution failed'
+      );
+    }
+  }
+
+  // Create WebSocket handler using Hono's upgradeWebSocket
+  const wsUpgrade = upgradeWebSocket(() => ({
+    onOpen: async (event: any, ws: any) => {
+      try {
+        // Create connection wrapper
+        const connectionId = generateConnectionId();
+        const connection = new WebSocketConnectionImpl({
+          id: connectionId,
+          ip: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
+          headers: normalizedReq.headers,
+          context: hookContext.context,
+          raw: ws,
+          sendFn: (data: any) => {
+            ws.send(data);
+          },
+          closeFn: (code?: number, reason?: string) => {
+            ws.close(code || 1000, reason);
+          },
+        });
+
+        // Store connection and context for later use
+        (ws as any).__bridgeConnection = connection;
+        (ws as any).__bridgeContext = hookContext;
+        (ws as any).__bridgeCleanup = cleanup;
+        (ws as any).__bridgeConfig = config;
+        (ws as any).__bridgeRouteName = routeName;
+        (ws as any).__bridgeSuccess = true;
+
+        if (config.logRequests) {
+          console.log(`[WS] ${routeName} - Connection opened`);
+        }
+
+        // Call user's onOpen handler
+        if (wsHandler.onOpen) {
+          await wsHandler.onOpen(connection);
+        }
+      } catch (error) {
+        console.error('WebSocket onOpen error:', error);
+        const errorMessage = error instanceof Error ? error.message : 'onOpen handler failed';
+        ws.send(JSON.stringify({
+          type: 'error',
+          code: 'HANDLER_ERROR',
+          message: errorMessage,
+        }));
+      }
+    },
+
+    onMessage: async (event: any, ws: any) => {
+      try {
+        const connection = (ws as any).__bridgeConnection;
+        if (!connection) {
+          console.error('WebSocket connection not found');
+          return;
+        }
+
+        // Parse message
+        let message: any;
+        try {
+          message = JSON.parse(event.data);
+        } catch {
+          message = event.data;
+        }
+
+        // Validate message if input schema is defined
+        if (routeDef.input) {
+          const validation = validateInput(routeDef.input, message);
+          if (!validation.success) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              code: 'VALIDATION_ERROR',
+              message: 'Invalid message format',
+              details: validation.errors,
+            }));
+            return;
+          }
+          message = validation.data;
+        }
+
+        // Call user's onMessage handler
+        await wsHandler.onMessage(message, connection);
+      } catch (error) {
+        console.error('WebSocket message handler error:', error);
+        const errorMessage = error instanceof Error ? error.message : 'Message handler failed';
+        (ws as any).__bridgeSuccess = false;
+
+        ws.send(JSON.stringify({
+          type: 'error',
+          code: 'HANDLER_ERROR',
+          message: errorMessage,
+        }));
+
+        if (wsHandler.onError) {
+          try {
+            const connection = (ws as any).__bridgeConnection;
+            await wsHandler.onError(connection, error as Error);
+          } catch (onErrorError) {
+            console.error('WebSocket onError handler error:', onErrorError);
+          }
+        }
+      }
+    },
+
+    onClose: async (event: any, ws: any) => {
+      try {
+        const connection = (ws as any).__bridgeConnection;
+        const hookContext = (ws as any).__bridgeContext;
+        const cleanup = (ws as any).__bridgeCleanup;
+        const config = (ws as any).__bridgeConfig;
+        const routeName = (ws as any).__bridgeRouteName;
+        const success = (ws as any).__bridgeSuccess !== false;
+
+        if (config?.logRequests) {
+          console.log(`[WS] ${routeName} - Connection closed: ${event.code}`);
+        }
+
+        // Call user's onClose handler
+        if (wsHandler.onClose && connection) {
+          await wsHandler.onClose(connection, event.code, event.reason || '');
+        }
+
+        // Execute cleanup hooks
+        if (cleanup && hookContext) {
+          for (const hook of cleanup) {
+            try {
+              await hook({
+                ...hookContext,
+                success,
+                error: success ? undefined : { status: 500, message: 'Handler error' },
+              });
+            } catch (error) {
+              console.error('WebSocket cleanup hook error (non-fatal):', error);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('WebSocket onClose error:', error);
+      }
+    },
+
+    onError: async (event: any, ws: any) => {
+      try {
+        console.error('WebSocket error:', event);
+        (ws as any).__bridgeSuccess = false;
+
+        const connection = (ws as any).__bridgeConnection;
+        if (wsHandler.onError && connection) {
+          await wsHandler.onError(connection, new Error('WebSocket error'));
+        }
+      } catch (error) {
+        console.error('WebSocket onError handler error:', error);
+      }
+    },
+  }));
+
+  return wsUpgrade(c);
+}
+
+/**
+ * Extracts lifecycle methods from hooks (simplified version for WebSocket).
+ * 
+ * @param hooks - Array of hooks
+ * @returns Object with before and cleanup hook arrays
+ * 
+ * @internal
+ */
+function extractLifecycleMethods(hooks: any[]): {
+  before: any[];
+  cleanup: any[];
+} {
+  const before: any[] = [];
+  const cleanup: any[] = [];
+
+  for (const hook of hooks) {
+    if (typeof hook === 'object' && '__isLifecycleHook' in hook) {
+      if (hook.before) before.push(hook.before);
+      if (hook.cleanup) cleanup.push(hook.cleanup);
+    } else if (typeof hook === 'function') {
+      before.push(hook);
+    }
+  }
+
+  return { before, cleanup };
 }

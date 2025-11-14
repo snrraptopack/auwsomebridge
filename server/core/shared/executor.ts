@@ -111,6 +111,16 @@ export class HookExecutor {
         const result: HookResult = await hook(ctx);
 
         if (!result.next) {
+          // Validate that status and error are provided
+          if (!result.status || !result.error) {
+            console.error('Hook returned next: false but missing status or error:', result);
+            return {
+              success: false,
+              status: 500,
+              error: 'Hook returned next: false but did not provide status and error message. This is a bug in the hook implementation.',
+            };
+          }
+          
           return {
             success: false,
             status: result.status,
@@ -165,6 +175,16 @@ export class HookExecutor {
         const result: AfterHookResult = await hook(afterCtx);
 
         if (!result.next) {
+          // Validate that status and error are provided
+          if (!result.status || !result.error) {
+            console.error('After hook returned next: false but missing status or error:', result);
+            return {
+              success: false,
+              status: 500,
+              error: 'After hook returned next: false but did not provide status and error message. This is a bug in the hook implementation.',
+            };
+          }
+          
           return {
             success: false,
             status: result.status,

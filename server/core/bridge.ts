@@ -18,9 +18,16 @@ export type {
   ApiSuccess,
   ApiError,
   ApiResponse,
+  WebSocketConnection,
+  WebSocketHandler,
+  WebSocketMessageHandler,
 } from './shared/types';
 
+// Import for internal use
+import type { WebSocketHandler } from './shared/types';
 
+// Re-export WebSocket utilities
+export { WebSocketConnectionImpl, generateConnectionId } from './shared/websocket';
 
 // Re-export hook utilities
 export { defineHook, composeHooks } from './shared/hooks';
@@ -120,13 +127,13 @@ export interface LegacyRouteDefinition<
   method?: HttpMethod;
   input?: I;
   output?: O;
-  handler: RouteHandler<ParsedInput<I>, OutputData<O>, C>;
+  handler: RouteHandler<ParsedInput<I>, OutputData<O>, C> | WebSocketHandler<ParsedInput<I>, C>;
   auth?: boolean;
   middleware?: RouteMiddleware[];
   description?: string;
   tags?: string[];
   hooks?: any[]; // Added for new hook system
-  kind?: 'sse' | 'http';
+  kind?: 'http' | 'sse' | 'ws';
 }
 
 /**
@@ -161,13 +168,13 @@ export function defineRoute<
   method?: HttpMethod;
   input?: I;
   output?: O;
-  handler: RouteHandler<ParsedInput<I>, OutputData<O>, C>;
+  handler: RouteHandler<ParsedInput<I>, OutputData<O>, C> | WebSocketHandler<ParsedInput<I>, C>;
   auth?: boolean;
   middleware?: RouteMiddleware[];
   hooks?: any[];
   description?: string;
   tags?: string[];
-  kind?: 'sse' | 'http';
+  kind?: 'http' | 'sse' | 'ws';
 }): LegacyRouteDefinition<I, O, C> {
   return def as LegacyRouteDefinition<I, O, C>;
 }
@@ -176,6 +183,64 @@ export type LegacyRoutesCollection = Record<string, LegacyRouteDefinition<any, a
 
 export type ExtractRoutes<T extends LegacyRoutesCollection> = {
   [K in keyof T]: T[K] extends LegacyRouteDefinition<
+    infer I extends z.ZodTypeAny | undefined,
+    infer O extends z.ZodTypeAny | undefined
+  >
+    ? I extends z.ZodTypeAny
+      ? (input: InputParams<I>) => Promise<OutputData<O>>
+      : () => Promise<OutputData<O>>
+    : never;
+};
+
+/**
+ * Helper to extract routes by kind
+ */
+type FilterRoutesByKind<T extends LegacyRoutesCollection, K extends string> = {
+  [P in keyof T as T[P] extends { kind: K } ? P : never]: T[P]
+};
+
+/**
+ * SSE route helper type.
+ * Extracts only SSE routes from the collection.
+ */
+export type ExtractSSERoutes<T extends LegacyRoutesCollection> = {
+  [K in keyof FilterRoutesByKind<T, 'sse'>]: (
+    input?: Record<string, unknown>,
+    handlers?: {
+      onMessage?: (data: any) => void;
+      onError?: (err: unknown) => void;
+      onOpen?: () => void;
+    }
+  ) => { close: () => void; es?: any }
+};
+
+/**
+ * WebSocket route helper type.
+ * Extracts only WebSocket routes from the collection.
+ */
+export type ExtractWSRoutes<T extends LegacyRoutesCollection> = {
+  [K in keyof FilterRoutesByKind<T, 'ws'>]: (
+    input?: Record<string, unknown>,
+    handlers?: {
+      onMessage?: (data: any) => void;
+      onError?: (err: unknown) => void;
+      onOpen?: () => void;
+      onClose?: (code: number, reason: string) => void;
+    }
+  ) => {
+    send: (data: any) => void;
+    close: (code?: number, reason?: string) => void;
+    readyState: number;
+    ws: any;
+  }
+};
+
+/**
+ * HTTP route helper type.
+ * Extracts only HTTP routes (excluding SSE and WS) from the collection.
+ */
+export type ExtractHTTPRoutes<T extends LegacyRoutesCollection> = {
+  [K in keyof T as T[K] extends { kind: 'sse' | 'ws' } ? never : K]: T[K] extends LegacyRouteDefinition<
     infer I extends z.ZodTypeAny | undefined,
     infer O extends z.ZodTypeAny | undefined
   >
@@ -342,7 +407,12 @@ export class FullStackBridge {
           }
         }
 
-        const result = await routeDef.handler(input, context);
+        // Check if this is a WebSocket route (not supported in legacy bridge)
+        if (routeDef.kind === 'ws') {
+          return this.sendError(res, 400, 'invalid_route', 'WebSocket routes not supported in legacy bridge');
+        }
+
+        const result = await (routeDef.handler as RouteHandler<any, any, any>)(input, context);
 
         if (routeDef.output && this.validateResponses) {
           const validation = routeDef.output.safeParse(result);
@@ -370,12 +440,18 @@ export class FullStackBridge {
   createClient<T extends LegacyRoutesCollection>(
     routeDefs: T,
     options?: { baseUrl?: string; onError?: (error: ApiError) => void }
-  ): ExtractRoutes<T> {
-    const client = {} as ExtractRoutes<T>;
+  ): ExtractHTTPRoutes<T> {
+    const client = {} as ExtractHTTPRoutes<T>;
     const baseUrl = options?.baseUrl ?? this.prefix;
 
     (Object.keys(routeDefs) as Array<keyof T>).forEach((routeName) => {
       const routeDef = routeDefs[routeName];
+      
+      // Skip SSE and WebSocket routes - they have their own helpers
+      if (routeDef.kind === 'sse' || routeDef.kind === 'ws') {
+        return;
+      }
+      
       (client[routeName] as any) = async (input?: unknown) => {
         const method = routeDef.method ?? 'POST';
         let url = `${baseUrl}/${String(routeName)}`;
@@ -548,8 +624,9 @@ export function setupBridge<T extends LegacyRoutesCollection>(
   };
 
   // Create client API (runtime-agnostic, uses legacy bridge for now)
-  let $api: ExtractRoutes<T>;
-  let $sse: Record<string, any> = {};
+  let $api: ExtractHTTPRoutes<T>;
+  let $sse: ExtractSSERoutes<T> = {} as ExtractSSERoutes<T>;
+  let $ws: ExtractWSRoutes<T> = {} as ExtractWSRoutes<T>;
   try {
     const bridge = new FullStackBridge(options);
     const defined = bridge.defineRoutes(routes);
@@ -558,12 +635,12 @@ export function setupBridge<T extends LegacyRoutesCollection>(
       onError: options?.clientOptions?.onError,
     });
 
-    // Build SSE helpers for routes with kind === 'sse'
+    // Build SSE and WebSocket helpers for routes
     const baseUrl = options?.baseUrl ?? options?.prefix ?? '/api';
     Object.entries(defined.__routes).forEach(([routeName, def]: any) => {
       if (def?.kind === 'sse') {
         const expectedMethod = def.method ?? 'GET';
-        $sse[routeName] = (input?: Record<string, unknown>, handlers?: {
+        ($sse as any)[routeName] = (input?: Record<string, unknown>, handlers?: {
           onMessage?: (data: any) => void;
           onError?: (err: unknown) => void;
           onOpen?: () => void;
@@ -634,18 +711,91 @@ export function setupBridge<T extends LegacyRoutesCollection>(
           return { close: () => controller.abort(), es: undefined };
         };
       }
+      
+      // Build WebSocket helpers for routes with kind === 'ws'
+      if (def?.kind === 'ws') {
+        ($ws as any)[routeName] = (input?: Record<string, unknown>, handlers?: {
+          onMessage?: (data: any) => void;
+          onError?: (err: unknown) => void;
+          onOpen?: () => void;
+          onClose?: (code: number, reason: string) => void;
+        }) => {
+          // Construct WebSocket URL
+          let wsUrl = baseUrl.replace(/^http/, 'ws'); // Convert http:// to ws:// or https:// to wss://
+          wsUrl = `${wsUrl}/${routeName}`;
+          
+          // Add query parameters if provided
+          if (input && typeof input === 'object') {
+            const params = new URLSearchParams();
+            for (const [k, v] of Object.entries(input)) {
+              if (v === undefined || v === null) continue;
+              params.append(k, String(v));
+            }
+            const qs = params.toString();
+            if (qs) wsUrl += `?${qs}`;
+          }
+          
+          // Create WebSocket connection
+          const ws = new WebSocket(wsUrl);
+          
+          // Wire up event handlers
+          if (handlers?.onOpen) {
+            ws.onopen = () => handlers.onOpen?.();
+          }
+          
+          if (handlers?.onMessage) {
+            ws.onmessage = (event: MessageEvent) => {
+              try {
+                const data = JSON.parse(event.data);
+                handlers.onMessage?.(data);
+              } catch {
+                handlers.onMessage?.(event.data);
+              }
+            };
+          }
+          
+          if (handlers?.onError) {
+            ws.onerror = (event: Event) => handlers.onError?.(event);
+          }
+          
+          if (handlers?.onClose) {
+            ws.onclose = (event: CloseEvent) => handlers.onClose?.(event.code, event.reason);
+          }
+          
+          // Return connection object with send and close methods
+          return {
+            send: (data: any) => {
+              if (ws.readyState === WebSocket.OPEN) {
+                const message = typeof data === 'string' ? data : JSON.stringify(data);
+                ws.send(message);
+              } else {
+                console.warn('WebSocket is not open. ReadyState:', ws.readyState);
+              }
+            },
+            close: (code?: number, reason?: string) => {
+              ws.close(code || 1000, reason);
+            },
+            get readyState() {
+              return ws.readyState;
+            },
+            ws, // Expose raw WebSocket for advanced use cases
+          };
+        };
+      }
     });
   } catch (error) {
     // If FullStackBridge fails (missing Express types), create a simple client
     console.warn('Client API creation failed, using fallback');
-    $api = {} as ExtractRoutes<T>;
-    $sse = {};
+    $api = {} as ExtractHTTPRoutes<T>;
+    $sse = {} as ExtractSSERoutes<T>;
+    $ws = {} as ExtractWSRoutes<T>;
   }
 
   return {
     middleware,
     metadata,
-    $api,
-    $sse,
+    $api: $api as ExtractHTTPRoutes<T>,
+    $sse: $sse as ExtractSSERoutes<T>,
+    $ws: $ws as ExtractWSRoutes<T>,
   };
 }

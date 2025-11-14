@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import type { RouteDefinition, BridgeConfig, HookContext } from '../shared/types';
+import type { RouteDefinition, BridgeConfig, HookContext, WebSocketHandler } from '../shared/types';
 import { HookExecutor } from '../shared/executor';
 import { validateInput, validateOutput } from '../shared/validation';
 import {
@@ -9,6 +9,11 @@ import {
 } from '../shared/response';
 import { HttpStatus, ErrorCode } from '../shared/error';
 import { normalizeExpressRequest } from './normalize';
+import { WebSocketConnectionImpl, generateConnectionId } from '../shared/websocket';
+
+// WebSocket types (optional dependency)
+type WebSocket = any;
+type WebSocketServer = any;
 
 // ============================================================================
 // EXPRESS ADAPTER
@@ -144,6 +149,18 @@ export function createExpressMiddleware(
         return res.status(result.status).json(errorResponse);
       }
 
+      // Handle WebSocket routes
+      if (routeDef.kind === 'ws') {
+        // WebSocket routes should not reach here - they should be handled by WebSocket server
+        // This is a fallback error response
+        return sendExpressError(
+          res,
+          HttpStatus.BAD_REQUEST,
+          ErrorCode.INTERNAL_ERROR,
+          'WebSocket routes must be accessed via WebSocket protocol'
+        );
+      }
+
       if (routeDef.kind === 'sse') {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
@@ -247,4 +264,317 @@ function extractRouteFromUrl(url: string, prefix?: string): string | null {
   const prefixPattern = cleanPrefix.replace(/\//g, '\\/');
   const match = path.match(new RegExp(`${prefixPattern}/([^/]+)`));
   return match ? match[1] : null;
+}
+
+// ============================================================================
+// WEBSOCKET SUPPORT
+// ============================================================================
+
+/**
+ * Creates a WebSocket server for Express with bridge integration.
+ * 
+ * This function sets up a WebSocket server that handles WebSocket routes
+ * defined with `kind: 'ws'`. It integrates with the bridge's hook system
+ * and validation.
+ * 
+ * @param routes - Map of route definitions
+ * @param config - Bridge configuration
+ * @returns WebSocket server instance
+ * 
+ * @example
+ * ```typescript
+ * import { WebSocketServer } from 'ws';
+ * import express from 'express';
+ * 
+ * const app = express();
+ * const server = app.listen(3000);
+ * 
+ * const wss = createExpressWebSocketServer(routes, config);
+ * wss.on('connection', (ws, req) => {
+ *   // Handled by bridge
+ * });
+ * 
+ * server.on('upgrade', (request, socket, head) => {
+ *   wss.handleUpgrade(request, socket, head, (ws) => {
+ *     wss.emit('connection', ws, request);
+ *   });
+ * });
+ * ```
+ */
+export function createExpressWebSocketServer(
+  routes: Map<string, RouteDefinition>,
+  config: BridgeConfig
+): WebSocketServer {
+  const executor = new HookExecutor();
+  const globalHooks = config.hooks || [];
+  
+  // Import WebSocketServer dynamically to avoid requiring ws as a dependency
+  let WebSocketServerClass: any;
+  try {
+    WebSocketServerClass = require('ws').WebSocketServer;
+  } catch (error) {
+    throw new Error(
+      'WebSocket support requires the "ws" package. Install it with: npm install ws @types/ws'
+    );
+  }
+  
+  const wss = new WebSocketServerClass({ noServer: true });
+  
+  wss.on('connection', async (ws: WebSocket, req: Request) => {
+    try {
+      // Extract route name from URL
+      const routeName = extractRouteFromUrl(req.url || '', config.prefix);
+      
+      if (!routeName) {
+        ws.close(1008, 'Route not found');
+        return;
+      }
+      
+      const routeDef = routes.get(routeName);
+      if (!routeDef || routeDef.kind !== 'ws') {
+        ws.close(1008, `WebSocket route ${routeName} not found`);
+        return;
+      }
+      
+      // Validate that handler is a WebSocket handler
+      const wsHandler = routeDef.handler as WebSocketHandler;
+      if (typeof wsHandler !== 'object' || !wsHandler.onMessage) {
+        ws.close(1011, 'Invalid WebSocket handler');
+        return;
+      }
+      
+      // Extract and validate query parameters (handshake input)
+      const url = new URL(req.url || '', `http://${req.headers.host}`);
+      const query: Record<string, string | string[]> = {};
+      url.searchParams.forEach((value, key) => {
+        const existing = query[key];
+        if (existing) {
+          if (Array.isArray(existing)) {
+            existing.push(value);
+          } else {
+            query[key] = [existing, value];
+          }
+        } else {
+          query[key] = value;
+        }
+      });
+      
+      let input: unknown = query;
+      
+      // Validate query parameters if input schema is defined
+      if (routeDef.input) {
+        const validation = validateInput(routeDef.input, input);
+        if (!validation.success) {
+          ws.close(1008, `Validation error: ${JSON.stringify(validation.errors)}`);
+          return;
+        }
+        input = validation.data;
+      }
+      
+      // Log request if enabled
+      if (config.logRequests) {
+        console.log(`[WS] ${routeName} - Connection from ${req.socket.remoteAddress}`);
+      }
+      
+      // Normalize request
+      const normalizedReq = normalizeExpressRequest(req);
+      
+      // Create platform context and hook context
+      const platform = { type: 'express' as const, req, res: null as any };
+      const hookContext: HookContext = {
+        req: normalizedReq,
+        platform,
+        method: 'GET',
+        route: routeName,
+        input,
+        context: { platform },
+      };
+      
+      // Execute before hooks
+      const allHooks = executor.combineHooks(globalHooks, routeDef.hooks);
+      const { before, cleanup } = extractLifecycleMethods(allHooks);
+      
+      // Run before hooks
+      for (const hook of before) {
+        try {
+          const result = await hook(hookContext);
+          if (!result.next) {
+            ws.close(1008, result.error);
+            return;
+          }
+        } catch (error) {
+          console.error('WebSocket before hook error:', error);
+          ws.close(1011, 'Hook execution failed');
+          return;
+        }
+      }
+      
+      // Create connection wrapper
+      const connectionId = generateConnectionId();
+      const connection = new WebSocketConnectionImpl({
+        id: connectionId,
+        ip: req.socket.remoteAddress,
+        headers: req.headers,
+        context: hookContext.context,
+        raw: ws,
+        sendFn: (data: any) => {
+          if (ws.readyState === 1) { // OPEN
+            ws.send(data);
+          }
+        },
+        closeFn: (code?: number, reason?: string) => {
+          ws.close(code || 1000, reason);
+        },
+      });
+      
+      // Track connection outcome for cleanup hooks
+      let connectionSuccess = true;
+      let connectionError: { status: number; message: string } | undefined;
+      
+      // Call onOpen handler
+      if (wsHandler.onOpen) {
+        try {
+          await wsHandler.onOpen(connection);
+        } catch (error) {
+          console.error('WebSocket onOpen error:', error);
+          const errorMessage = error instanceof Error ? error.message : 'onOpen handler failed';
+          ws.send(JSON.stringify({
+            type: 'error',
+            code: 'HANDLER_ERROR',
+            message: errorMessage,
+          }));
+        }
+      }
+      
+      // Handle incoming messages
+      ws.on('message', async (data: Buffer | string) => {
+        try {
+          // Parse message
+          let message: any;
+          try {
+            const messageStr = data.toString();
+            message = JSON.parse(messageStr);
+          } catch {
+            message = data.toString();
+          }
+          
+          // Validate message if input schema is defined
+          if (routeDef.input) {
+            const validation = validateInput(routeDef.input, message);
+            if (!validation.success) {
+              ws.send(JSON.stringify({
+                type: 'error',
+                code: 'VALIDATION_ERROR',
+                message: 'Invalid message format',
+                details: validation.errors,
+              }));
+              return;
+            }
+            message = validation.data;
+          }
+          
+          // Call onMessage handler
+          await wsHandler.onMessage(message, connection);
+        } catch (error) {
+          console.error('WebSocket message handler error:', error);
+          const errorMessage = error instanceof Error ? error.message : 'Message handler failed';
+          connectionSuccess = false;
+          connectionError = { status: 500, message: errorMessage };
+          
+          ws.send(JSON.stringify({
+            type: 'error',
+            code: 'HANDLER_ERROR',
+            message: errorMessage,
+          }));
+          
+          if (wsHandler.onError) {
+            try {
+              await wsHandler.onError(connection, error as Error);
+            } catch (onErrorError) {
+              console.error('WebSocket onError handler error:', onErrorError);
+            }
+          }
+        }
+      });
+      
+      // Handle connection close
+      ws.on('close', async (code: number, reason: Buffer) => {
+        const reasonStr = reason.toString();
+        
+        if (config.logRequests) {
+          console.log(`[WS] ${routeName} - Connection closed: ${code} ${reasonStr}`);
+        }
+        
+        // Call onClose handler
+        if (wsHandler.onClose) {
+          try {
+            await wsHandler.onClose(connection, code, reasonStr);
+          } catch (error) {
+            console.error('WebSocket onClose error:', error);
+          }
+        }
+        
+        // Execute cleanup hooks
+        for (const hook of cleanup) {
+          try {
+            await hook({
+              ...hookContext,
+              success: connectionSuccess,
+              error: connectionError,
+            });
+          } catch (error) {
+            console.error('WebSocket cleanup hook error (non-fatal):', error);
+          }
+        }
+      });
+      
+      // Handle errors
+      ws.on('error', async (error: Error) => {
+        console.error('WebSocket error:', error);
+        connectionSuccess = false;
+        connectionError = { status: 500, message: error.message };
+        
+        if (wsHandler.onError) {
+          try {
+            await wsHandler.onError(connection, error);
+          } catch (onErrorError) {
+            console.error('WebSocket onError handler error:', onErrorError);
+          }
+        }
+      });
+      
+    } catch (error) {
+      console.error('WebSocket connection setup error:', error);
+      ws.close(1011, 'Internal server error');
+    }
+  });
+  
+  return wss;
+}
+
+/**
+ * Extracts lifecycle methods from hooks (simplified version for WebSocket).
+ * 
+ * @param hooks - Array of hooks
+ * @returns Object with before and cleanup hook arrays
+ * 
+ * @internal
+ */
+function extractLifecycleMethods(hooks: any[]): {
+  before: any[];
+  cleanup: any[];
+} {
+  const before: any[] = [];
+  const cleanup: any[] = [];
+  
+  for (const hook of hooks) {
+    if (typeof hook === 'object' && '__isLifecycleHook' in hook) {
+      if (hook.before) before.push(hook.before);
+      if (hook.cleanup) cleanup.push(hook.cleanup);
+    } else if (typeof hook === 'function') {
+      before.push(hook);
+    }
+  }
+  
+  return { before, cleanup };
 }
